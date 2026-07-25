@@ -1,0 +1,283 @@
+/* Inpost UI kit — shared surfaces, fields, menus, dialogs */
+
+:root {
+  --ui-radius: 10px;
+  --ui-radius-sm: 7px;
+  --ui-shadow: 0 16px 40px rgba(15, 23, 42, 0.18);
+  --ui-shadow-sm: 0 4px 14px rgba(15, 23, 42, 0.1);
+  --ui-ring: 0 0 0 3px rgba(37, 99, 235, 0.2);
+  --ui-overlay: rgba(15, 23, 42, 0.45);
+}
+
+/* —— Buttons —— */
+.ui-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: var(--ui-radius-sm);
+  border: 1px solid transparent;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease;
+}
+
+.ui-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.ui-btn-primary {
+  background: var(--accent);
+  color: #fff;
+}
+
+.ui-btn-primary:hover:not(:disabled) {
+  background: #1d4ed8;
+}
+
+.ui-btn-secondary {
+  background: var(--surface);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.ui-btn-secondary:hover:not(:disabled) {
+  background: var(--sidebar);
+}
+
+.ui-btn-danger {
+  background: var(--delete);
+  color: #fff;
+}
+
+.ui-btn-danger:hover:not(:disabled) {
+  background: #b91c1c;
+}
+
+.ui-btn-ghost {
+  background: transparent;
+  color: var(--muted);
+}
+
+.ui-btn-ghost:hover:not(:disabled) {
+  background: var(--sidebar);
+  color: var(--text);
+}
+
+.ui-btn-sm {
+  height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+/* —— Fields —— */
+.ui-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ui-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.ui-input {
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--ui-radius-sm);
+  background: var(--surface);
+  outline: none;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+
+.ui-input:focus {
+  border-color: var(--accent);
+  box-shadow: var(--ui-ring);
+}
+
+.ui-input::placeholder {
+  color: #9ca3af;
+}
+
+/* —— Select —— */
+.ui-select {
+  position: relative;
+  min-width: 0;
+}
+
+.ui-select-trigger {
+  width: 100%;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--ui-radius-sm);
+  background: var(--surface);
+  cursor: pointer;
+  text-align: left;
+}
+
+.ui-select-trigger:hover {
+  border-color: #9ca3af;
+}
+
+.ui-select-trigger.open {
+  border-color: var(--accent);
+  box-shadow: var(--ui-ring);
+}
+
+.ui-select-value {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.ui-select-chevron {
+  display: inline-flex;
+  color: var(--muted);
+  flex-shrink: 0;
+  line-height: 0;
+}
+
+.ui-select-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 60;
+  max-height: 220px;
+  overflow: auto;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--ui-radius);
+  box-shadow: var(--ui-shadow-sm);
+}
+
+.ui-select-option {
+  width: 100%;
+  text-align: left;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.ui-select-option:hover,
+.ui-select-option.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* —— Modal —— */
+.ui-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--ui-overlay);
+  backdrop-filter: blur(2px);
+  animation: ui-fade 0.12s ease;
+}
+
+.ui-modal {
+  width: min(420px, 100%);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: var(--ui-shadow);
+  overflow: hidden;
+  animation: ui-pop 0.14s ease;
+}
+
+.ui-modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 16px 0;
+}
+
+.ui-modal-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.ui-modal-close {
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  line-height: 0;
+}
+
+.ui-modal-close:hover {
+  background: var(--sidebar);
+  color: var(--text);
+}
+
+.ui-modal-body {
+  padding: 14px 16px 8px;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.ui-modal-message {
+  margin: 0;
+  color: var(--muted);
+}
+
+.ui-modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px 16px;
+}
+
+@keyframes ui-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes ui-pop {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "name": "inpost",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "build:mcp": "npm --prefix mcp install && npm --prefix mcp run build && mkdir -p src-tauri/resources/mcp && cp mcp/dist/stdio.mjs src-tauri/resources/mcp/stdio.mjs",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "check": "cargo test -p inpost-core && npx --yes tsx src/searchQuery.ts && npx --yes tsx src/shortcuts.ts && npx --yes tsx src/workspaceSession.ts && npx --yes tsx src/envVar.ts && npx --yes tsx src/envSync.ts"
+  },
+  "dependencies": {
+    "@codemirror/lang-json": "^6.0.2",
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-opener": "^2",
+    "@uiw/react-codemirror": "^4.25.11",
+    "lucide-react": "^1.26.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^4.6.0",
+    "typescript": "~5.8.3",
+    "vite": "^7.0.4"
+  }
+}
