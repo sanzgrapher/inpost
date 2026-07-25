@@ -2,7 +2,7 @@
 
 **Purpose:** Living log so any new chat stays on track. Agents **read this first**, then **append** after each user request they work on.
 
-**Last updated:** 2026-07-25
+**Last updated:** 2026-07-25 (resource_dir subpath fix)
 
 ---
 
@@ -57,6 +57,14 @@
 ---
 
 ## Trace log (newest first)
+
+### 2026-07-25 — Fix silent MCP stdio.mjs install on Windows (resource_dir subpath bug)
+**User asked:** Installed the released Windows .exe but MCP wouldn't start in Cursor — `mcp/` dir had `session.json` but no `stdio.mjs`. Outpost's install puts the file in **both** `D:\Installed\…" and the runtime `AppData\Roaming\com.outpost.desktop\mcp\` copy; Inpost only in the installer copy.
+**Did:** Root cause: `bridge::install_stdio_bundle` silently no-oped when the chosen source `Path` didn't exist (`if resource_stdio.exists() { copy }`), and `lib.rs` setup chose a wrong source path — `resource_dir().join("mcp").join("stdio.mjs")` lands at `D:\Installed\Inpost\mcp\stdio.mjs`, but Tauri 2 `bundle.resources: ["resources/mcp/stdio.mjs"]` keeps the `resources/` prefix on disk so the real file is at `D:\Installed\Inpost\resources\mcp\stdio.mjs`. The legacy `CARGO_MANIFEST_DIR/../mcp/dist/stdio.mjs` fallback pointed at the CI build machine (baked compile-time) — doesn't exist on the user's PC. Net result: `session.json` was written (looked healthy), `stdio.mjs` was never copied (silent), MCP couldn't spawn → `MODULE_NOT_FOUND`.
+  - `src-tauri/src/bridge.rs`: `install_stdio_bundle` now **errors** on missing source (no silent no-op); source-existence check moved above `create_dir_all`/`copy` so a bad source never touches the dest dir.
+  - `src-tauri/src/lib.rs`: setup now tries **two** joins — `resource_dir().join("resources").join("mcp").join("stdio.mjs")` (real Tauri 2 install layout, what shipped) — and falls back to `resource_dir().join("mcp").join("stdio.mjs")` (older/flat dev layout). The `CARGO_MANIFEST_DIR` dev-tree fallback is now `#[cfg(debug_assertions)]`-only (release builds reject a phantom CI path as a real error rather than papering over). `let _ =` swallowing the install result replaced with an `eprintln!` + visible failure path.
+  - New `bridge::tests::install_stdio_bundle_errors_on_missing_source` — the lazy-senior runnable check: feed a bogus source path, assert `Err` with "not found". 19/19 `inpost-core` + 1/1 new test green; `cargo check` + `cargo check --release` both clean.
+**Needs next:** Cut v0.1.1 (or re-tag `v0.1.0 -f` after the cross-shell build:mcp fix from the prior trace entry lands together): commit this fix, force-update the tag, push, watch `release.yml` go green on all 4 matrix jobs, confirm install on Windows produces `C:\Users\…\AppData\Roaming\com.inpost.desktop\mcp\stdio.mjs` next to `session.json`. Then re-test Cursor MCP via the Windows install path. Longer-term upgrade path noted in code: switch to `tauri::path::ResourceDirectory::resolve()` once stable across 2.x minors. Pre-existing deferred: code-signing/notarization.
 
 ### 2026-07-25 — Release pipeline v2 — tauri-action + cross-shell build:mcp (after first tag run failed)
 **User asked:** Push code, create the v0.1.0 tag, run the GitHub Action to build & create the release with per-OS installer attachments. (Then: "check with gh what happened and is there a release created")

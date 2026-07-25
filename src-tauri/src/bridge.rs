@@ -113,12 +113,17 @@ fn write_session(bridge_url: &str, token: &str) -> Result<(), String> {
 
 /// Copy bundled stdio.mjs next to session.json (refreshed each launch).
 pub fn install_stdio_bundle(resource_stdio: &std::path::Path) -> Result<std::path::PathBuf, String> {
-    let dir = mcp_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let dest = dir.join("stdio.mjs");
-    if resource_stdio.exists() {
-        std::fs::copy(resource_stdio, &dest).map_err(|e| e.to_string())?;
+    if !resource_stdio.exists() {
+        return Err(format!(
+            "stdio.mjs source not found: {}",
+            resource_stdio.display()
+        ));
     }
+    let dir = mcp_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create mcp dir: {e}"))?;
+    let dest = dir.join("stdio.mjs");
+    std::fs::copy(resource_stdio, &dest)
+        .map_err(|e| format!("copy stdio.mjs: {e}"))?;
     Ok(dest)
 }
 
@@ -585,4 +590,22 @@ fn run_request(
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn install_stdio_bundle_errors_on_missing_source() {
+        // Regression: install_stdio_bundle used to silently no-op when the
+        // resource path didn't exist, leaving session.json present but stdio.mjs
+        // missing on Windows installs. It must now surface the failure.
+        let bogus = std::path::PathBuf::from("/this/path/does/not/exist/stdio.mjs");
+        let err = install_stdio_bundle(&bogus).unwrap_err();
+        assert!(
+            err.contains("not found"),
+            "expected 'not found' in error, got: {err}"
+        );
+    }
 }

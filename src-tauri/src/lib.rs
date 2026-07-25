@@ -410,18 +410,30 @@ pub fn run() {
                 db::mcp_dir()
             );
 
-            // Prefer bundled resource; fall back to repo mcp/dist during `tauri dev`
             let resource = app
                 .path()
                 .resource_dir()
                 .ok()
-                .map(|p| p.join("mcp").join("stdio.mjs"));
-            let dev = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../mcp/dist/stdio.mjs");
+                .map(|rd| {
+                    [
+                        rd.join("resources").join("mcp").join("stdio.mjs"),
+                        rd.join("mcp").join("stdio.mjs"),
+                    ]
+                });
+            #[cfg(debug_assertions)]
+            let dev: Option<std::path::PathBuf> = Some(
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../mcp/dist/stdio.mjs"),
+            );
+            #[cfg(not(debug_assertions))]
+            let dev: Option<std::path::PathBuf> = None;
             let src = resource
-                .filter(|p| p.exists())
-                .unwrap_or(dev);
-            let _ = bridge::install_stdio_bundle(&src);
+                .and_then(|cands| cands.into_iter().find(|p| p.exists()))
+                .or_else(|| dev.filter(|p| p.exists()))
+                .ok_or_else(|| "stdio.mjs not found in bundled resources".to_string())?;
+            if let Err(e) = bridge::install_stdio_bundle(&src) {
+                eprintln!("Inpost: MCP stdio install failed: {e}");
+            }
 
             app.manage(db);
             app.manage(bridge);
