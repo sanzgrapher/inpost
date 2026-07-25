@@ -58,6 +58,24 @@
 
 ## Trace log (newest first)
 
+### 2026-07-25 — Release pipeline v2 — tauri-action + cross-shell build:mcp (after first tag run failed)
+**User asked:** Push code, create the v0.1.0 tag, run the GitHub Action to build & create the release with per-OS installer attachments. (Then: "check with gh what happened and is there a release created")
+**Did:** Pushed `61bfebb`/`747fd21` to `origin/main` (SSH remote — sandbox blocks `.git/config` writes, so flipped to inline SSH URL `git@github.com:sanzgrapher/inpost.git`) + tagged `v0.1.0` + pushed tag. CI results from GitHub API (curl, anon read-only):
+  - `check.yml` on push main → ✅ green in ~3 min.
+  - `release.yml` on `v0.1.0` tag → ❌ all three matrix jobs failed; **no Release was created** (the separate `release:` job was `needs: build`, so any OS failure blocked Release attachment).
+  Three root causes from the run annotations page:
+  1. **macOS**: glob used `bundle/app/*.app` (wrong) — Tauri 2 writes `.app` to `bundle/macos/`. `.dmg` glob was correct.
+  2. **Linux**: `upload-artifact@v4` `if-no-files-found: error` killed the whole job — combined glob of `deb/rpm/appimage` reported "no files found" even though deb/rpm were definitely built (the report lumps all globs).
+  3. **Windows**: preflight exit 1 within ~59s — root cause: `build:mcp` in `package.json` used `cp mcp/dist/stdio.mjs src-tauri/resources/mcp/stdio.mjs && mkdir -p ...` and **npm spawns package scripts via `cmd.exe` on Windows regardless of the outer shell**; `cp` is not a cmd builtin, `mkdir -p` is rejected. `shell: bash` on the workflow step does NOT fix this (npm spawns internally).
+
+  **Fixes:**
+  - Rewrote [.github/workflows/release.yml](../.github/workflows/release.yml) on `tauri-apps/tauri-action@v0` (Yaak pattern from `mountain-loop/yaak` workflow). It knows per-OS bundle paths internally, creates the Release, attaches all artifacts in one action — deleted the separate `release:` job and the buggy `upload-artifact@v4` step entirely. Matrix now has **two macOS entries** (`aarch64-apple-darwin` M1+ and `x86_64-apple-darwin` Intel) so we ship Universal-ish. Added `Swatinem/rust-cache@v2` for warm release builds. Added `if: github.repository == 'sanzgrapher/inpost'` guard (Yaak pattern — forks don't burn release minutes). Added `libnss3` to Linux deps (Yaak). Kept `xdg-utils`.
+  - New cross-shell [scripts/build-mcp.mjs](../scripts/build-mcp.mjs) using native Node `fs`/`cp`/`mkdirSync(recursive:true)` — no shell builtins. Replaced the `build:mcp` npm script body with `node scripts/build-mcp.mjs`. Verified locally — copies `mcp/dist/stdio.mjs → src-tauri/resources/mcp/stdio.mjs` on every OS.
+  Re-ran `npm run ci:gates` locally end-to-end with the new build:mcp: 19/19 cargo tests + 7 tsx self-checks + vite build + cargo build --release (57s, warm cache). All green, exit 0.
+
+**Needs next:** Commit these fixes, force-update `v0.1.0` tag (annotated tag, so re-tag with `-f`), push, watch `release.yml` run green on all 4 matrix entries, confirm the Release at `github.com/sanzgrapher/inpost/releases/tag/v0.1.0` has Linux (`deb`/`rpm`/`AppImage`) + Windows (`msi`/`exe`) + macOS (`dmg`/`app` × Intel and arm64) installers attached. Pre-existing deferred: code-signing/notarization for macOS + Windows (certs/Apple Developer ID), notarized `.dmg` w/ Gatekeeper.
+
+
 ### 2026-07-25 — Release pipeline (local preflight + CI matrix)
 **User asked:** Build a release workflow/code that runs the same gate sequence locally first, then in GitHub Actions — only push once the local verification is green.
 **Did:** One source of truth for the gates via `npm run preflight` in [package.json](../package.json): `build:mcp → tsc --noEmit → cargo test -p inpost-core + tsx self-checks → vite build → cargo build --release -p inpost → tauri build`. `ci:gates` is the same minus the bundle (fast PR gate). [scripts/preflight.sh](../scripts/preflight.sh) wraps `npm run preflight` with PASS/FAIL + lists installers under `src-tauri/target/release/bundle/`. Two workflows: [release.yml](../.github/workflows/release.yml) triggers on `v*` tags, matrix `ubuntu-22.04/windows-latest/macos-latest` (fail-fast:false), runs `npm run preflight`, uploads per-OS artifacts, single `release` job downloads them all and attaches via `softprops/action-gh-release@v2` with `generate_release_notes`. [check.yml](../.github/workflows/check.yml) triggers on push main + PRs, single ubuntu job runs `npm run ci:gates` (no bundling). README "Release / preflight" section documents the one local command + the tag flow. Linux apt deps: webkit2gtk-4.1, libsoup-3, ayatana-appindicator3 (appindicator3 is gone on 22.04), rsvg2, patchelf, openssl.

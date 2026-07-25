@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "build:mcp": "npm --prefix mcp install && npm --prefix mcp run build && mkdir -p src-tauri/resources/mcp && cp mcp/dist/stdio.mjs src-tauri/resources/mcp/stdio.mjs",
+    "build:mcp": "node scripts/build-mcp.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
     "check": "cargo test -p inpost-core && npx --yes tsx src/searchQuery.ts && npx --yes tsx src/shortcuts.ts && npx --yes tsx src/workspaceSession.ts && npx --yes tsx src/envVar.ts && npx --yes tsx src/envSync.ts && npx --yes tsx src/reqMeta.ts && npx --yes tsx src/mdEdit.ts",
