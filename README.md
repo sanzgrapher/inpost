@@ -24,6 +24,21 @@ Self-check (env substitution — no UI needed):
 npm run check
 ```
 
+## Release / preflight
+
+Before pushing, run the full release pipeline locally — the **same** gate sequence the GitHub Action runs:
+
+```bash
+./scripts/preflight.sh        # = npm run preflight + artifact summary
+```
+
+This runs `build:mcp → tsc --noEmit → cargo test + tsx self-checks → vite build → cargo build --release → tauri build`, then lists the installers under `src-tauri/target/release/bundle/`. Run it before every tag push.
+
+CI:
+
+- Push to `main` or any PR runs `.github/workflows/check.yml` (gates only, no bundling).
+- Tag a release with `git tag vX.Y.Z && git push --tags` — `.github/workflows/release.yml` builds Linux + Windows + macOS installers in parallel and attaches them to the GitHub Release. (Unsigned — code-signing/notarization is a follow-up.)
+
 ## MCP (Phase 1)
 
 Keep **Inpost running**, then point your MCP client at the copied stdio script (refreshed on each launch):

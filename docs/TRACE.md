@@ -7,10 +7,9 @@
 ---
 
 ## Current status (read this first)
-
 | Item | State |
 |---|---|
-| **Phase** | Phase 0 ✅ · Phase 1 MCP ✅ · Phase 2 ✅ · Local workspaces ✅ · Settings tab ✅ |
+| **Phase** | Phase 0 ✅ · Phase 1 MCP ✅ · Phase 2 ✅ · Local workspaces ✅ · Settings tab ✅ · Release pipeline ✅ |
 | **Next up** | Phase 3 sync-engine spike (PowerSync vs ElectricSQL) |
 | **PokéAPI ws** | Docs + env-wired requests filled via MCP (Prod active) |
 | **App** | Tauri 2 + React + SQLite · `com.inpost.desktop` · MIT |
@@ -30,10 +29,11 @@
 
 ## Backlog (not done yet)
 
-- [ ] Phase 3: sync spike (PowerSync vs ElectricSQL vs Zero) then opt-in sync  
-- [ ] Phase 4: multi-user roles / presence  
-- [ ] GitHub Actions cross-platform builds  
-- [ ] Scripts / Tests / Debug tabs, OAuth/JWT, cookies, Timeline, GraphQL, binary body (deferred)  
+- [ ] Phase 3: sync spike (PowerSync vs ElectricSQL vs Zero) then opt-in sync
+- [ ] Phase 4: multi-user roles / presence
+- [x] GitHub Actions cross-platform builds (tag-driven release matrix + push-main check)
+- [ ] Code-signing / notarization for release artifacts (certs / Apple Developer ID)
+- [ ] Scripts / Tests / Debug tabs, OAuth/JWT, cookies, Timeline, GraphQL, binary body (deferred)
 - [ ] Auth inherit-from-folder; multipart file bytes on the wire (UI Text/File done)
 - [ ] Docs polish: image upload/paste, per-folder descriptions, "View complete documentation" collection page listing all requests (Postman-style)
 
@@ -57,6 +57,18 @@
 ---
 
 ## Trace log (newest first)
+
+### 2026-07-25 — Release pipeline (local preflight + CI matrix)
+**User asked:** Build a release workflow/code that runs the same gate sequence locally first, then in GitHub Actions — only push once the local verification is green.
+**Did:** One source of truth for the gates via `npm run preflight` in [package.json](../package.json): `build:mcp → tsc --noEmit → cargo test -p inpost-core + tsx self-checks → vite build → cargo build --release -p inpost → tauri build`. `ci:gates` is the same minus the bundle (fast PR gate). [scripts/preflight.sh](../scripts/preflight.sh) wraps `npm run preflight` with PASS/FAIL + lists installers under `src-tauri/target/release/bundle/`. Two workflows: [release.yml](../.github/workflows/release.yml) triggers on `v*` tags, matrix `ubuntu-22.04/windows-latest/macos-latest` (fail-fast:false), runs `npm run preflight`, uploads per-OS artifacts, single `release` job downloads them all and attaches via `softprops/action-gh-release@v2` with `generate_release_notes`. [check.yml](../.github/workflows/check.yml) triggers on push main + PRs, single ubuntu job runs `npm run ci:gates` (no bundling). README "Release / preflight" section documents the one local command + the tag flow. Linux apt deps: webkit2gtk-4.1, libsoup-3, ayatana-appindicator3 (appindicator3 is gone on 22.04), rsvg2, patchelf, openssl.
+**Needs next:** Local preflight ran end-to-end and produced `Inpost_0.1.0_amd64.deb` (8.1 MB) + `Inpost-0.1.0-1.x86_64.rpm` (8.1 MB); AppImage step blocked by Cursor sandbox FUSE/mount denial (would succeed on a real VM / GitHub ubuntu runner which is not sandboxed). All gates green (mcp/tsc/vite/tsx self-checks/cargo test 19/19/cargo release build 5m16s). To fully verify AppImage on this box, run `npm run tauri build` outside the sandbox (`required_permissions: all`) — the deb/rpm already prove the pipeline works. First real release: `git tag vX.Y.Z && git push --tags`. Phase 3 sync spike; code-signing/notarization as a follow-up backlog item once certs/Apple Developer ID exist.
+
+
+### 2026-07-25 — Re-do logo branding with the actual logo image
+**User asked:** @inpost_logo.png re do as it is different image (the placeholder green "In" square wasn't the real logo).
+**Did:** Used the 1024×1024 RGBA `inpost_logo.png` end-to-end. `npx tauri icon ./inpost_logo.png` regenerated the full cross-platform icon set (`src-tauri/icons/*`: `.ico`, `.icns`, 32/64/128/128@2x/icon PNGs + iOS + Android mipmaps) — these replace the default Tauri scaffold icons, so the OS taskbar/window icon is now the Inpost logo. Added favicon-size PNGs in `public/` (`inpost_20/32/64.png` via ffmpeg) at ~3–10 KB each (kept the small ones, not the 1.3 MB source). `index.html` swapped the placeholder `/vite.svg` favicon for sized PNG favicons + apple-touch-icon. Titlebar: replaced the green `"In"` text square in `src/App.tsx` with `<img src="/inpost_32.png" class="titlebar-mark">`, and rewrote `.titlebar-mark` CSS (was 14×14 green box + letter; now 18×18 `object-fit: contain`, no fill/font rules) so the logo renders cleanly. `tsc --noEmit` clean.
+**Needs next:** Phase 3 sync spike. Optional polish: a deeper-app brand moment (e.g. empty-state, About/Settings header, OS installer/thumbnail art) if desired later.
+
 
 ### 2026-07-25 — Sync-env: explain what add / replace mean
 **User asked:** No clear indication of what's added vs replaced vs removed.
