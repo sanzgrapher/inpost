@@ -373,17 +373,13 @@ textarea {
 }
 
 .titlebar-mark {
-  width: 14px;
-  height: 14px;
-  border-radius: 3px;
-  background: #22c55e;
-  color: #fff;
-  font-size: 8px;
-  font-weight: 700;
-  display: grid;
-  place-items: center;
-  line-height: 1;
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  object-fit: contain;
   flex-shrink: 0;
+  -webkit-user-drag: none;
+  user-select: none;
 }
 
 .titlebar-label {

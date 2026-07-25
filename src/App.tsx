@@ -1105,9 +1105,13 @@ function TitleBar({
   return (
     <div className="titlebar" data-tauri-drag-region>
       <div className="titlebar-left" data-tauri-drag-region>
-        <span className="titlebar-mark" data-tauri-drag-region>
-          In
-        </span>
+        <img
+          className="titlebar-mark"
+          src="/inpost_32.png"
+          alt=""
+          draggable={false}
+          data-tauri-drag-region
+        />
         <span className="titlebar-label" data-tauri-drag-region>
           Inpost
         </span>
