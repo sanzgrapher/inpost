@@ -2,7 +2,7 @@
 
 **Purpose:** Living log so any new chat stays on track. Agents **read this first**, then **append** after each user request they work on.
 
-**Last updated:** 2026-07-25 (resource_dir subpath fix)
+**Last updated:** 2026-07-25 (v0.1.0 re-released with stdio.mjs install fix)
 
 ---
 
@@ -57,6 +57,16 @@
 ---
 
 ## Trace log (newest first)
+
+### 2026-07-25 — v0.1.0 re-tagged & re-released with the stdio.mjs install fix
+**User asked:** "proceed pusha and run builds with release aand release notes fix xyz" — push the stdio.mjs install fix, re-cut v0.1.0 with it, run the release matrix, write proper release notes.
+**Did:** `npm run check` green locally (19/19 cargo + 7 tsx self-checks + tsc/vite). Committed `95ae15d` "Fix silent MCP stdio.mjs install on Windows" (the three-file diff from the previous trace entry). `git push origin main` → `aedf857..95ae15d`. Re-tagged `v0.1.0 -f` (annotated) at `95ae15d` with a release-notes preamble, force-pushed the tag → triggered both `release.yml` (tag) and `check.yml` (main).
+  - **Release `30166334483` ✓ all 4 matrix jobs**: Apple Silicon 4m1s, Intel 3m6s, Linux 4m40s, Windows 6m8s. Exit 0. Only annotations: cosmetic "actions/checkout@v4 targets Node 20, runner forces Node 24" on every OS (non-fatal).
+  - **Check `30166315995` ✓ gates** in 5m34s.
+  All 9 v0.1.0 release assets freshly uploaded ~16:50–16:53 UTC (after the 16:47 re-tag push) — rpm/deb/AppImage on Linux, x64 setup.exe + x64_en-US.msi on Windows, aarch64+x64 .dmg + .app.tar.gz on macOS. The Windows installers now include the runtime-copy fix.
+  Replaced the placeholder `releaseBody` ("See the assets…") with polished markdown notes via `gh release edit v0.1.0 --notes-file /tmp/inpost-v0.1.0-notes.md` — first-release summary, highlights bullets, **"What changed in v0.1.0 since the first build artifacts"** explaining both fixes (#1 cross-shell build:mcp, #2 silent stdio.mjs install), MCP-bridge per-OS path table (incl. the Cursor-WSL → Windows-Inpost `/mnt/c/...` case), roadmap.
+
+**Needs next:** Verify on the Windows box — uninstall old / install new `Inpost_0.1.0_x64-setup.exe`, launch once, `dir %APPDATA%\com.inpost.desktop\mcp\` should show both `session.json` and `stdio.mjs`; Cursor MCP then starts (Windows: `C:\Users\…\AppData\Roaming\com.inpost.desktop\mcp\stdio.mjs`; Cursor-WSL: `/mnt/c/Users/…/AppData/Roaming/com.inpost.desktop/mcp/stdio.mjs`). Pre-existing backlog: code-signing/notarization (no certs yet). Tidy: bump `actions/checkout@v4` → `v5` + `actions/setup-node@v4` → `v5` to retire the Node-20 annotation. Phase 3 sync spike is the next feature.
 
 ### 2026-07-25 — Fix silent MCP stdio.mjs install on Windows (resource_dir subpath bug)
 **User asked:** Installed the released Windows .exe but MCP wouldn't start in Cursor — `mcp/` dir had `session.json` but no `stdio.mjs`. Outpost's install puts the file in **both** `D:\Installed\…" and the runtime `AppData\Roaming\com.outpost.desktop\mcp\` copy; Inpost only in the installer copy.
