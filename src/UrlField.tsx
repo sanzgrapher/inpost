@@ -19,6 +19,8 @@ const Ism = { size: 12, strokeWidth: 1.75 } as const;
 type Props = {
   value: string;
   onChange: (v: string) => void;
+  /** Reset undo history when this changes (e.g. selected request id). */
+  historyKey?: string;
   inputRef?: RefObject<HTMLInputElement | null>;
   placeholder?: string;
   className?: string;
@@ -34,9 +36,12 @@ type HoverState = {
   rect: DOMRect;
 };
 
+const HISTORY_CAP = 60;
+
 export function UrlField({
   value,
   onChange,
+  historyKey,
   inputRef,
   placeholder,
   className = "",
@@ -58,6 +63,51 @@ export function UrlField({
   const leaveTimer = useRef<number | null>(null);
   const editingRef = useRef(false);
   editingRef.current = editing;
+  // Controlled value kills browser undo — keep our own (typing + external overrides).
+  const undoStack = useRef<string[]>([]);
+  const redoStack = useRef<string[]>([]);
+  const lastCommitted = useRef(value);
+
+  useEffect(() => {
+    undoStack.current = [];
+    redoStack.current = [];
+    lastCommitted.current = value;
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only reset on key change
+  }, [historyKey]);
+
+  useEffect(() => {
+    if (value === lastCommitted.current) return;
+    // Params / load / paste-from-elsewhere rewrote the URL — make it undoable.
+    undoStack.current.push(lastCommitted.current);
+    if (undoStack.current.length > HISTORY_CAP) undoStack.current.shift();
+    redoStack.current = [];
+    lastCommitted.current = value;
+  }, [value]);
+
+  function commit(next: string) {
+    if (next === value) return;
+    undoStack.current.push(value);
+    if (undoStack.current.length > HISTORY_CAP) undoStack.current.shift();
+    redoStack.current = [];
+    lastCommitted.current = next;
+    onChange(next);
+  }
+
+  function undoUrl() {
+    const prev = undoStack.current.pop();
+    if (prev === undefined) return;
+    redoStack.current.push(value);
+    lastCommitted.current = prev;
+    onChange(prev);
+  }
+
+  function redoUrl() {
+    const next = redoStack.current.pop();
+    if (next === undefined) return;
+    undoStack.current.push(value);
+    lastCommitted.current = next;
+    onChange(next);
+  }
 
   const activeMap = pairsToMap(envPairs);
   const globalMap = pairsToMap(globalPairs);
@@ -202,9 +252,22 @@ export function UrlField({
         value={value}
         placeholder={placeholder}
         spellCheck={false}
-        onChange={(e) => onChange(e.target.value)}
+        onChange={(e) => commit(e.target.value)}
         onFocus={() => setFocused(true)}
         onBlur={() => setFocused(false)}
+        onKeyDown={(e) => {
+          const mod = e.ctrlKey || e.metaKey;
+          if (mod && e.key.toLowerCase() === "z") {
+            e.preventDefault();
+            if (e.shiftKey) redoUrl();
+            else undoUrl();
+            return;
+          }
+          if (mod && e.key.toLowerCase() === "y") {
+            e.preventDefault();
+            redoUrl();
+          }
+        }}
       />
       {!focused && <div className="url-field-hit">{renderTokens(true)}</div>}
 

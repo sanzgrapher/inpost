@@ -58,6 +58,21 @@ export function effectiveScope(scope: SearchScope): SearchScope {
   return out;
 }
 
+/** The `in:`/`from:`/`folder:` token still being typed at the end of the input. */
+export function trailingScope(
+  text: string,
+): { key: ScopeKey; value: string; start: number } | null {
+  const trail = TRAILING_RE.exec(text);
+  if (!trail) return null;
+  const inner = /^(from|in|folder):(?:"([^"]*)"|(\S*))$/i.exec(trail[1]);
+  if (!inner) return null;
+  return {
+    key: inner[1].toLowerCase() as ScopeKey,
+    value: (inner[2] ?? inner[3] ?? "").trim(),
+    start: trail.index,
+  };
+}
+
 function quoteScopeValue(v: string): string {
   return /\s/.test(v) ? `"${v}"` : v;
 }
@@ -82,6 +97,26 @@ export function scopeChips(scope: SearchScope): { key: string; value: string }[]
   if (scope.in) out.push({ key: "in", value: scope.in });
   if (scope.folder) out.push({ key: "folder", value: scope.folder });
   return out;
+}
+
+/**
+ * Turn the last committed chip back into editable input text (so Backspace
+ * doesn't wipe a filter in one shot — it becomes `in:Foo` you can edit).
+ */
+export function uncommitLastChip(scope: SearchScope): SearchScope | null {
+  const chips = scopeChips(scope);
+  if (chips.length === 0) return null;
+  const last = chips[chips.length - 1]!;
+  const next: SearchScope = {
+    from: scope.from,
+    in: scope.in,
+    folder: scope.folder,
+    text: scope.text,
+  };
+  next[last.key as ScopeKey] = undefined;
+  const token = `${last.key}:${quoteScopeValue(last.value)}`;
+  next.text = scope.text.trim() ? `${token} ${scope.text.trim()}` : token;
+  return next;
 }
 
 export type IndexItem = {
@@ -152,6 +187,69 @@ export function filterIndex(
   });
 }
 
+export type ScopeSuggestion = { key: ScopeKey; value: string };
+
+/** Values that exist in the index for one scope key, narrowed by the other scopes. */
+function valuesFor(
+  items: IndexItem[],
+  key: ScopeKey,
+  scope: SearchScope,
+  workspaceId?: string,
+): string[] {
+  let pool = items;
+  // `from:` is the way out of the current workspace, so it is never narrowed by it.
+  if (key !== "from") {
+    if (scope.from) pool = pool.filter((i) => nameMatch(i.workspaceName, scope.from!));
+    else if (workspaceId) pool = pool.filter((i) => i.workspaceId === workspaceId);
+  }
+  if (key === "folder" && scope.in) {
+    pool = pool.filter((i) => nameMatch(i.collectionName, scope.in!));
+  }
+  const names = new Set<string>();
+  for (const i of pool) {
+    if (key === "from") names.add(i.workspaceName);
+    else if (key === "in") names.add(i.collectionName);
+    else {
+      if (i.kind === "folder") names.add(i.title);
+      for (const p of i.path) names.add(p);
+    }
+  }
+  return [...names];
+}
+
+/**
+ * Suggestions for a half-typed `key:value`. Falls back to the other keys so
+ * `in:moves` still finds the *folder* named Moves instead of dead-ending.
+ */
+export function scopeSuggestions(
+  items: IndexItem[],
+  trail: { key: ScopeKey; value: string },
+  scope: SearchScope,
+  opts?: { workspaceId?: string; limit?: number },
+): ScopeSuggestion[] {
+  const limit = opts?.limit ?? 8;
+  const q = trail.value.trim().toLowerCase();
+  const rank = (list: string[], key: ScopeKey): ScopeSuggestion[] =>
+    list
+      .filter((n) => !q || n.toLowerCase().includes(q))
+      .sort(
+        (a, b) =>
+          Number(!a.toLowerCase().startsWith(q)) -
+            Number(!b.toLowerCase().startsWith(q)) || a.localeCompare(b),
+      )
+      .map((value) => ({ key, value }));
+
+  const own = rank(valuesFor(items, trail.key, scope, opts?.workspaceId), trail.key);
+  if (own.length || !q) return own.slice(0, limit);
+
+  const others: ScopeKey[] = (["in", "folder", "from"] as const).filter(
+    (k) => k !== trail.key,
+  );
+  return others
+    .flatMap((k) => rank(valuesFor(items, k, scope, opts?.workspaceId), k))
+    .slice(0, limit);
+}
+
 // Runnable self-check: `npx tsx src/searchQuery.ts`
 declare const process: { argv: string[] } | undefined;
 if (typeof process !== "undefined" && process.argv[1]?.includes("searchQuery")) {
@@ -178,6 +276,13 @@ if (typeof process !== "undefined" && process.argv[1]?.includes("searchQuery")) 
   const chipOnly = parseSearchQuery(serializeSearchQuery({ in: "default", text: "" }));
   console.assert(chipOnly.in === "default" && chipOnly.text === "", "chip-only roundtrip");
 
+  const un = uncommitLastChip({ in: "Default", folder: "Auth", text: "login" });
+  console.assert(un?.folder === undefined && un?.in === "Default", "uncommit drops last chip");
+  console.assert(un?.text === "folder:Auth login", `uncommit text got ${un?.text}`);
+  const unOnly = uncommitLastChip({ in: "Default", text: "" });
+  console.assert(unOnly?.text === "in:Default" && !unOnly?.in, "uncommit sole chip to text");
+  console.assert(uncommitLastChip({ text: "x" }) === null, "uncommit with no chips");
+
   const items: IndexItem[] = [
     {
       kind: "request",
@@ -194,5 +299,43 @@ if (typeof process !== "undefined" && process.argv[1]?.includes("searchQuery")) 
   ];
   const hits = filterIndex(items, p);
   console.assert(hits.length === 1, "hit");
+
+  console.assert(trailingScope("in:def")?.value === "def", "trailing value");
+  console.assert(trailingScope("in:")?.key === "in", "bare key is a trailing scope");
+  console.assert(trailingScope("in:default unti") === null, "committed scope is not trailing");
+
+  const pool: IndexItem[] = [
+    ...items,
+    {
+      kind: "folder",
+      id: "f1",
+      title: "Moves",
+      path: [],
+      collectionId: "c2",
+      collectionName: "PokéAPI v2",
+      workspaceId: "w1",
+      workspaceName: "Personal",
+    },
+  ];
+  const bare = scopeSuggestions(pool, { key: "in", value: "" }, { text: "" });
+  console.assert(
+    bare.length === 2 && bare.every((s) => s.key === "in"),
+    `bare in: lists collections, got ${JSON.stringify(bare)}`,
+  );
+  const folderFallback = scopeSuggestions(pool, { key: "in", value: "moves" }, { text: "" });
+  console.assert(
+    folderFallback[0]?.key === "folder" && folderFallback[0]?.value === "Moves",
+    `in:moves falls back to the folder, got ${JSON.stringify(folderFallback)}`,
+  );
+  const fromSug = scopeSuggestions(pool, { key: "from", value: "per" }, { text: "" });
+  console.assert(
+    fromSug[0]?.value === "Personal",
+    `from: suggests workspaces, got ${JSON.stringify(fromSug)}`,
+  );
+  console.assert(
+    scopeSuggestions(pool, { key: "in", value: "zzz" }, { text: "" }).length === 0,
+    "no suggestion when nothing matches any key",
+  );
+
   console.log("searchQuery self-check ok");
 }

@@ -5,10 +5,12 @@ import {
   useEffect,
   useId,
   useMemo,
+  useLayoutEffect,
   useRef,
   useState,
   type ReactNode,
 } from "react";
+import { createPortal } from "react-dom";
 import { ChevronDown, X } from "lucide-react";
 import "./ui.css";
 
@@ -141,18 +143,206 @@ export function Select({
   );
 }
 
+/** Free-text input with a filtered suggestion menu (replaces native datalist). */
+export function SuggestInput({
+  value,
+  onChange,
+  suggestions,
+  placeholder,
+  readOnly,
+  className = "",
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  suggestions: string[];
+  placeholder?: string;
+  readOnly?: boolean;
+  className?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [active, setActive] = useState(0);
+  const [menuPos, setMenuPos] = useState<{
+    top: number;
+    left: number;
+    width: number;
+  } | null>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+
+  const filtered = useMemo(() => {
+    const q = value.trim().toLowerCase();
+    const list = !q
+      ? suggestions
+      : suggestions.filter((s) => s.toLowerCase().includes(q));
+    return [...list]
+      .sort((a, b) => {
+        if (!q) return a.localeCompare(b);
+        return (
+          Number(!a.toLowerCase().startsWith(q)) -
+            Number(!b.toLowerCase().startsWith(q)) || a.localeCompare(b)
+        );
+      })
+      .slice(0, 14);
+  }, [value, suggestions]);
+
+  const show = open && !readOnly && filtered.length > 0;
+
+  function placeMenu() {
+    const el = inputRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    setMenuPos({ top: r.bottom + 4, left: r.left, width: r.width });
+  }
+
+  useLayoutEffect(() => {
+    if (!show) {
+      setMenuPos(null);
+      return;
+    }
+    placeMenu();
+    window.addEventListener("resize", placeMenu);
+    // Capture scroll from any ancestor (headers pane, etc.)
+    window.addEventListener("scroll", placeMenu, true);
+    return () => {
+      window.removeEventListener("resize", placeMenu);
+      window.removeEventListener("scroll", placeMenu, true);
+    };
+  }, [show, value]);
+
+  useEffect(() => setActive(0), [filtered, open]);
+
+  useEffect(() => {
+    if (!show) return;
+    listRef.current
+      ?.querySelector(".ui-suggest-option.active")
+      ?.scrollIntoView({ block: "nearest" });
+  }, [active, show]);
+
+  useEffect(() => {
+    if (!open) return;
+    function onDoc(e: MouseEvent) {
+      const t = e.target as Node;
+      if (rootRef.current?.contains(t)) return;
+      if (listRef.current?.contains(t)) return;
+      setOpen(false);
+    }
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+
+  function pick(s: string) {
+    onChange(s);
+    setOpen(false);
+    inputRef.current?.focus();
+  }
+
+  return (
+    <div className={`ui-suggest ${className}`.trim()} ref={rootRef}>
+      <input
+        ref={inputRef}
+        type="text"
+        value={value}
+        placeholder={placeholder}
+        readOnly={readOnly}
+        autoComplete="off"
+        spellCheck={false}
+        onChange={(e) => {
+          onChange(e.target.value);
+          setOpen(true);
+        }}
+        onFocus={() => {
+          if (!readOnly) setOpen(true);
+        }}
+        onKeyDown={(e) => {
+          if (!show) {
+            if (e.key === "ArrowDown" && filtered.length) {
+              e.preventDefault();
+              setOpen(true);
+            }
+            return;
+          }
+          if (e.key === "ArrowDown") {
+            e.preventDefault();
+            setActive((i) => Math.min(i + 1, filtered.length - 1));
+          } else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            setActive((i) => Math.max(i - 1, 0));
+          } else if (e.key === "Enter" && filtered[active]) {
+            e.preventDefault();
+            pick(filtered[active]);
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            setOpen(false);
+          } else if (e.key === "Tab" && filtered[active]) {
+            pick(filtered[active]);
+          }
+        }}
+      />
+      {show &&
+        menuPos &&
+        createPortal(
+          <div
+            className="ui-suggest-menu"
+            ref={listRef}
+            role="listbox"
+            style={{
+              top: menuPos.top,
+              left: menuPos.left,
+              width: Math.max(menuPos.width, 180),
+            }}
+          >
+            {filtered.map((s, i) => (
+              <button
+                key={s}
+                type="button"
+                role="option"
+                aria-selected={i === active}
+                className={`ui-suggest-option ${i === active ? "active" : ""}`}
+                onMouseEnter={() => setActive(i)}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  pick(s);
+                }}
+              >
+                {highlightSuggest(s, value)}
+              </button>
+            ))}
+          </div>,
+          document.body,
+        )}
+    </div>
+  );
+}
+
+function highlightSuggest(label: string, needle: string): ReactNode {
+  const q = needle.trim();
+  if (!q) return label;
+  const i = label.toLowerCase().indexOf(q.toLowerCase());
+  if (i < 0) return label;
+  return (
+    <>
+      {label.slice(0, i)}
+      <mark>{label.slice(i, i + q.length)}</mark>
+      {label.slice(i + q.length)}
+    </>
+  );
+}
+
 export function Modal({
   open,
   title,
   children,
   onClose,
   footer,
+  className = "",
 }: {
   open: boolean;
   title: string;
   children: ReactNode;
   onClose: () => void;
   footer?: ReactNode;
+  className?: string;
 }) {
   useEffect(() => {
     if (!open) return;
@@ -174,7 +364,7 @@ export function Modal({
       }}
     >
       <div
-        className="ui-modal"
+        className={`ui-modal ${className}`.trim()}
         role="dialog"
         aria-modal="true"
         aria-label={title}

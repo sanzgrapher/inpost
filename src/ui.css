@@ -186,6 +186,71 @@
   color: var(--accent);
 }
 
+/* —— Suggest input (datalist replacement) —— */
+.ui-suggest {
+  position: relative;
+  min-width: 0;
+  width: 100%;
+}
+
+.ui-suggest > input {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: var(--surface);
+  font: inherit;
+  color: var(--text);
+}
+
+.ui-suggest > input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--ui-ring);
+}
+
+.ui-suggest-menu {
+  position: fixed;
+  z-index: 80;
+  max-height: 240px;
+  overflow: auto;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--ui-radius);
+  box-shadow: var(--ui-shadow-sm);
+}
+
+.ui-suggest-option {
+  width: 100%;
+  display: block;
+  text-align: left;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: var(--mono, ui-monospace, monospace);
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ui-suggest-option:hover,
+.ui-suggest-option.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.ui-suggest-option mark {
+  background: #fef08a;
+  color: inherit;
+  padding: 0 1px;
+  border-radius: 2px;
+}
+
 /* —— Modal —— */
 .ui-overlay {
   position: fixed;
@@ -207,6 +272,14 @@
   box-shadow: var(--ui-shadow);
   overflow: hidden;
   animation: ui-pop 0.14s ease;
+}
+
+.ui-modal.import-openapi-modal {
+  width: min(520px, 100%);
+}
+
+.ui-modal.env-sync-modal {
+  width: min(900px, 96vw);
 }
 
 .ui-modal-head {

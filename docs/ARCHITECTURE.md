@@ -20,7 +20,7 @@ docs/PRD.md          Product requirements
 
 - **Requestly** (`requestly.com`) — UX/UI target (light 3-pane, rail, history). App is closed-source; community hub only.
 - **Yaak** (`mountain-loop/yaak`) — Tauri/Rust/React shell, models, HTTP IPC
-- **Outpost** — sync + MCP UX parity; no public source
+- **Requestly MCP** (`requestly/mcp`, MIT) — SDK packaging for stdio MCP tools
 
 ## Next
 

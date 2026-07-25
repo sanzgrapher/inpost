@@ -12,12 +12,13 @@
 |---|---|
 | **Phase** | Phase 0 ✅ · Phase 1 MCP ✅ · Phase 2 ✅ · Local workspaces ✅ · Settings tab ✅ |
 | **Next up** | Phase 3 sync-engine spike (PowerSync vs ElectricSQL) |
+| **PokéAPI ws** | Docs + env-wired requests filled via MCP (Prod active) |
 | **App** | Tauri 2 + React + SQLite · `com.inpost.desktop` · MIT |
 | **UX ref** | Requestly (layout/flow) — proprietary app; study screenshots only |
 | **Arch ref** | Yaak (Tauri/Rust/React) |
-| **MCP ref** | Outpost *pattern* (stdio→localhost bridge+session.json); Requestly MCP *packaging* (open MIT SDK) — do **not** copy Outpost `stdio.mjs` |
+| **MCP ref** | Localhost bridge + `session.json` + bundled `stdio.mjs`; Requestly MCP *packaging* (open MIT SDK) |
 | **Run** | `npm run build:mcp && npm run tauri dev` (or `npm run tauri dev` which runs build:mcp first) |
-| **Check** | `npm run check` → `cargo test -p inpost-core` + `src/searchQuery.ts` / `src/shortcuts.ts` / `src/workspaceSession.ts` / `src/envVar.ts` / `src/envSync.ts` self-checks |
+| **Check** | `npm run check` → `cargo test -p inpost-core` + `src/searchQuery.ts` / `src/shortcuts.ts` / `src/workspaceSession.ts` / `src/envVar.ts` / `src/envSync.ts` / `src/reqMeta.ts` self-checks |
 | **MCP config** | Keep app open; point Cursor at `~/.local/share/com.inpost.desktop/mcp/stdio.mjs` (Linux) / `%APPDATA%\com.inpost.desktop\mcp\stdio.mjs` (Windows) — or copy from **Settings → MCP** |
 
 ### Key docs
@@ -32,7 +33,9 @@
 - [ ] Phase 3: sync spike (PowerSync vs ElectricSQL vs Zero) then opt-in sync  
 - [ ] Phase 4: multi-user roles / presence  
 - [ ] GitHub Actions cross-platform builds  
-- [ ] Auth tab, scripts, GraphQL/WS (non-goals for v1 / backlog)
+- [ ] Scripts / Tests / Debug tabs, OAuth/JWT, cookies, Timeline, GraphQL, binary body (deferred)  
+- [ ] Auth inherit-from-folder; multipart file bytes on the wire (UI Text/File done)
+- [ ] Docs polish: image upload/paste, per-folder descriptions, "View complete documentation" collection page listing all requests (Postman-style)
 
 ---
 
@@ -49,10 +52,206 @@
 - Settings tab (titlebar ⚙ → open tab; General + MCP copy path/config)  
 - Request dirty dot on tabs; rename via breadcrumb (URL-bar name field removed)  
 - Shortcut table (`src/shortcuts.ts`) drives handler + Settings → Keyboard + empty-response hints  
+- Request body types (none/JSON/text/urlencoded/multipart) + Auth (Bearer/Basic/API key) + path params + header autocomplete + response History tab  
 
 ---
 
 ## Trace log (newest first)
+
+### 2026-07-25 — Sync-env: explain what add / replace mean
+**User asked:** No clear indication of what's added vs replaced vs removed.
+**Did:** Sync is unidirectional source→target; no removals. (1) Renamed tags `new`/`overwrite` → `add`/`replace` everywhere (`App.tsx` + CSS classes) so the action verb matches the intent. (2) Added a description paragraph at the top of `.env-sync` that explicitly states the rules — selected keys get **added** if missing, **replaced** if existing, and explicitly notes **"anything not selected is left untouched — nothing is removed"** to remove any ambiguity around delete. Description uses the same color-coded pill (`.env-sync-pill.add` green / `.env-sync-pill.replace` amber) that appear on each row, so the legend lives in the same color code as the row tags. (3) Added `data-tip` on each row's tag with the precise action ("Replace existing `baseUrl` in target with source value").
+**Needs next:** Phase 3 sync spike.
+
+### 2026-07-25 — Sync-env: character-level git diff (#2)
+**User asked:** Whole pill is rendering green even though only one char changed — they want the diff char to pop more (bolder) and the unchanged part to stay neutral, not get tinted green.
+**Did:** The `.env-sync-d-old`/`.env-sync-d-new` wrappers used a tinted fill (`#fef2f2`/`#f0fdf4`) which bled into the equal text and made the whole side look "green" or "red" even though only one char differed. Stripped the per-side fill — sides now have only a thin border (`.env-sync-d-old` 1px `#fecaca` border on a near-white fill, `.env-sync-d-new` 1px `#bbf7d0` border on a near-white fill) so the compartments read as "old side / new side" without colouring the unchanged text. Removed the outer `.env-sync-d-change` background/border too — only the diff segments (`env-diff-del` red `#fecaca` bg + bold, `env-diff-ins` green `#bbf7d0` bg + bold) carry the strong colour, and they sit on plain `--text` for the equal parts. So `abcxyz → abcxyc` now reads as `(red border) −abcxy z | +abcxy c` (green border) with only `z` and `c` bold and colour-saturated; everything else is neutral.
+**Needs next:** Phase 3 sync spike.
+
+### 2026-07-25 — Sync-env: character-level git diff
+**User asked:** Strikethrough is wrong (suggests delete); whole-line red/green loses the actual diff signal — only the changed characters should pop, like real git word-diff.
+**Did:** Added `diffTokens()` to `envSync.ts` — word-level LCS over whitespace tokens, optionally refined with char-level LCS for runs of single whitespace-less tokens (whole URLs / paths). Three segment kinds: `equal` / `removed` / `added`. The new `env-diff-eq` span uses `--text` (so unchanged chars stay neutral), `env-diff-del` red + `fecaca` bg + bold, `env-diff-ins` green + `bbf7d0` bg + bold — colour is targeted only at the characters that actually changed. Renderer pieces are imported + the inline `renderDiffSide()` helper emits three span classes per adjacent segment. URL `…/v1` → `…/v2` now renders as `…/api/v` neutral + red `1` + green `2`. `same` row still shows muted `= value` so no-op replaces don't look false-positive. Self-check covers URL refine, identical-short-circuit, fully-different, and word-boundary (`foo bar` vs `foo baz` keeps `foo ` equal). Removed stripe-strikethrough colour stays consistent with the tag chips (add/replace) and the inner pills (`env-sync-pill`).
+**Needs next:** Phase 3 sync spike.
+
+### 2026-07-25 — Sync-env modal: wider & roomier (round 2)
+**User asked:** Sync env variables modal is still too tight — value column is truncating long URLs.
+**Did:** Modal box bumped 720px→900px (96vw). `.env-sync-val` column expansion: `minmax(220px, 2.2fr)` (was `1.6fr`) so URLs can stretch to ~400px before ellipsis; column gap 14→16px, item padding 10×14→11×16px. `.env-sync` and `.env-sync-row` no longer force min-width on the layout (let the modal cap govern) so the list fills the new wider body cleanly. `.env-sync-key` now has a 120px floor before it can shrink. Full value is already reachable via the existing in-app `data-tip` tooltip on `.env-sync-val` (hover for the un-truncated URL).
+**Needs next:** Phase 3 sync spike.
+
+### 2026-07-25 — Fix VarField double-text glitch
+**User asked:** Black text from input + blue mirror text are rendering on top of each other → ghost/double-text.
+**Did:** Root cause: `.kv-row input:not([type="checkbox"]) { color: var(--text) }` was more specific than `.var-field .vf-input { color: transparent }`, so the visible input rendered black ON TOP of the colored mirror → two blacks + a blue offset = glitch. Fixed by scoping the `.kv-row` rule to direct-child (`>`) inputs, so it no longer reaches `.vf-input` (which is nested inside `.var-field`); also added `-webkit-text-fill-color: transparent` as a Chromium/WebKit-grade override so no stray `color` rule can reshow input text.
+**Needs next:** Phase 3 sync spike.
+
+### 2026-07-25 — Stop VarField "glitchy" overlay
+**User asked:** Why is the VarField rendering glitchy?
+**Did:** Previous overlay-on-top layout stacked an opaque `<input>` at z=1 with a transparent-text highlight `<div>` at z=2; form-control text vs span text misaligned by a subpixel, giving the ghost/shimmer effect. Switched back to the proven URL-bar pattern: mirror (`vf-mirror`, z=0, colored text + highlighted `vf-var`) under a transparent `vf-input` (z=1, transparent color but visible caret) with a `vf-hit` layer (z=2) that only the `{{var}}` spans get pointer events on. Password fields now skip the overlay entirely (`vf-input-plain`) so the OS-masked dots show.
+**Needs next:** Phase 3 sync spike.
+
+### 2026-07-25 — Match URL-bar input look across fields
+**User asked:** VarField feels bolder than the URL bar — make Params / Body / JSON / Auth inputs same UI as URL.
+**Did:** Root cause was VarField + `.kv-row`/`.mp-*` inputs used the body sans-serif font at 34px; URL bar uses `var(--mono)` 32px. Aligned `.var-field`, `.vf-input`, `.vf-overlay`, `.kv-row input`, `.mp-key`/`.mp-value`, and `.var-field.ui-input` (auth) to the same typography as the URL bar: 32px tall, `--mono`, 0 10px padding, accent focus ring.
+**Needs next:** Phase 3 sync spike.
+
+### 2026-07-25 — VarField visible text + JSON var typing
+**User asked:** Params/Header/body/Auth `{{var}}` field shows white/invisible text; popover works but field unclear. Also: does JSON int vs string substitution work? Get Species path var also broken in UI.
+**Did:** Simplified `VarField` — one visible input (`vf-input`) + overlay (`vf-overlay`) that paints only the blue/red `{{var}}` spans as hover anchors; literal text always shows in `var(--text)`. Verified path-var pipeline on the wire: Get Species via MCP `run_request` → `resolvedUrl: …/pokemon-species/aegislash` (substitution already correct; the screenshot " Get Species path var problem" was the same text-rendering issue). Documented JSON int-vs-string substitution in `docs/MCP.md` — env vars are strings, the surrounding JSON quotes decide type.
+**Needs next:** Phase 3 sync spike.
+
+### 2026-07-25 — {{var}} hover-edit beyond URL bar
+**User asked:** What about input fields / JSON body / other places we use `{{vars}}`?
+**Did:** Shared `EnvVarHover` (`VarField` + `EnvVarPop`). Wired hover-edit into Params (query+path), Headers, urlencoded/multipart values, Auth fields, and JSON/text body CodeMirror (`cm-env-var` marks). Env editor table stays plain (editing vars themselves).
+**Needs next:** Phase 3 sync spike.
+
+### 2026-07-25 — Keep {{vars}} unencoded in query URL
+**User asked:** `{{value}}` in Params can’t hover-edit; request URL shows `%7B%7Blimit%7D%7D` instead of `{{limit}}`.
+**Did:** Root cause: `joinUrl` used `encodeURIComponent` on query values, mangling braces so UrlField `tokenizeUrl` / crumb `substituteVars` never saw `{{vars}}`. Added `encodeQueryPart` in `envVar.ts` (encode around, leave `{{…}}` literal); `joinUrl` uses it. Self-check asserts; stored List Pokémon URL was already clean.
+**Needs next:** Re-open or touch Params on open tabs that already show encoded URLs so they recompose; Phase 3 sync spike.
+
+### 2026-07-25 — Fill PokéAPI workspace via MCP
+**User asked:** Use Inpost MCP; fix what's needed; fill docs, request fields, environments + variables in the poke workspace.
+**Did:** Via MCP on workspace `PokéAPI`: deleted 6 junk Untitled requests; fixed Type URL junk query; set collection Markdown docs; polished Global / Prod / Dev env vars (`baseUrl`, resource names, `pokemonId`, `limit`/`offset`, `accept`/`userAgent`); updated all 10 requests with Overview docs, `Accept`/`User-Agent` headers, path vars wired to `{{env}}`, env-driven URLs. Smoke `run_request`: List Pokémon / Get Pokémon (ditto) / Get Type (flying) → 200.
+**Needs next:** Phase 3 sync spike.
+
+### 2026-07-25 — Clarify MCP Local vs Prod compare via run_request
+**User asked:** Can MCP switch env and hit a request — e.g. compare Local vs Prod with the same request?
+**Did:** Confirmed already supported: `run_request({ requestId, environmentId })` uses that env for the call only (Global still merges); omit = active env. Documented the two-call Local/Prod pattern in the tool description + `set_active_environment` note (prefer per-call id over flipping UI active). Rebuilt MCP; updated `docs/MCP.md`.
+**Needs next:** Restart / refresh MCP so Cursor sees the clearer tool text.
+
+### 2026-07-25 — Fix bridge compile (early return type)
+**User asked:** Terminal showed `error[E0308]` in `bridge.rs` after MCP collection description work.
+**Did:** Replaced `return json_err(...)` inside the create-collection handler (wrong: that returns from the outer `Result<(), ()>` fn) with a nested match that always yields a `Response`.
+**Needs next:** Dev rebuild should succeed; Phase 3 sync spike.
+
+### 2026-07-25 — MCP documentation tools + field guidance
+**User asked:** Integrate docs into MCP; tool descriptions should say what/how to write and what is / isn't available on the documentation field.
+**Did:** Bridge: `POST /v1/collections` accepts optional `description`; new `PATCH /v1/collections/{id}` → `set_collection_description`. MCP: shared `DOC_FIELD_GUIDE` (CommonMark allow-list vs HTML/Editor.js/uploads/folder docs); `create_collection` + new `set_collection_description`; enriched `create_request` / `update_request` / list/get/import/export tool + zod `.describe()` text; `update_request` preserves existing description when the param is omitted (pass `""` to clear). Rebuilt `stdio.mjs`. Updated `docs/MCP.md`.
+**Needs next:** Restart Inpost (or re-copy MCP) so Cursor picks up the new tool list; Phase 3 sync spike.
+
+### 2026-07-25 — Postman-style docs rendering + collection documentation
+**User asked:** Overview textarea not intuitive — render docs Postman-style with UI-based editing, centered article layout; same for collection documentation; evaluate Editor.js.
+**Did:** Rejected Editor.js (block-JSON isn't valid OpenAPI CommonMark; lossy converters both ways) — kept Markdown as storage, added `markdown-it` (html:false → XSS-safe) for rendering. New `src/mdEdit.ts` (pure toolbar actions: bold/italic/strike/headings/lists/quote/code/codeblock/link with toggle + selection math; self-check wired into `npm run check`). New `src/Docs.tsx`: `Markdown` (external links via opener plugin), `MarkdownEditor` (Write/Preview tabs + toolbar + Ctrl+B/I/K), `DocArticle` (centered 760px article, title, meta, Edit/Done toggle, empty-state CTA). Request Overview tab now renders `DocArticle` with method+resolved-URL chip (saves via existing draft/dirty flow). Collection docs: new `__coldoc__:<id>` pseudo-tab (strip render, switch/close/fallback, tab search "docs" kind), `CollectionDocView` with explicit Save via `set_collection_description`, opened from collection context menu → Documentation. CSS: `.doc-*`, `.md-body`, `.md-editor*`.
+**Needs next:** Docs polish backlog item (images, folder descriptions, full collection doc page listing all requests).
+
+### 2026-07-25 — Export reveal works on WSL + real desktops
+**User asked:** Is the OpenURI DBus error expected on this WSL setup, and will Show-in-folder work on real Windows/macOS/Linux builds?  
+**Did:** Confirmed: export itself was fine; opener’s Linux path needs FileManager1/xdg-desktop-portal, which WSL doesn’t provide — so the red “Request error” was a false alarm from piping reveal failures into the HTTP error pane. Fixed `reveal_path` to try opener first, then platform fallbacks (Windows `explorer /select`, macOS `open -R`, Linux `xdg-open` dir, **WSL → `wslpath -w` + `explorer.exe /select`**). Reveal errors stay on the toast. Export now prefers/creates `~/Downloads` instead of dumping into `$HOME` when XDG Downloads is missing.  
+**Needs next:** Phase 3 sync spike.
+
+### 2026-07-25 — Export toast with Show in folder
+**User asked:** No feedback on export; want a "file exported" notification with show-containing-folder and dismiss so the user sees where it went.  
+**Did:** `export_openapi` command now writes the spec straight to the Downloads folder (sanitized collection name, ` (n)` de-dupe) and returns the path — replaces the opaque blob-anchor download. New `reveal_path` command wraps `tauri_plugin_opener::reveal_item_in_dir` (Rust side, no capability scope needed). Frontend shows a bottom-right toast (`.export-toast`) with the full path, **Show in folder**, **Dismiss** (×), and 8 s auto-dismiss.  
+**Needs next:** Phase 3 sync spike.
+
+### 2026-07-25 — Import OpenAPI modal (drop / browse / paste)
+**User asked:** Import button currently opens the OS native file picker; want a modal with drop file, browse, or paste code.  
+**Did:** Replaced the hidden `<input type=file>` Import control with a button that opens an Import OpenAPI modal (reuses `Modal`). File tab: drag-drop zone + Browse files (JSON/YAML/YML, 100 MB cap). Paste tab: textarea for raw OpenAPI. Import invokes existing `import_openapi`. Optional `className` on `Modal` for wider dialog.  
+**Needs next:** Phase 3 sync spike.
+
+### 2026-07-25 — OpenAPI overview/docs round-trip (first slice)
+**User asked:** Add OpenAPI overview/documentation so it shows in the UI and can be exported/edited/updated — then "implement it".
+**Did:** Added `description` to requests + collections end to end. DB migration (`ALTER TABLE requests/collections ADD COLUMN description`), `HttpRequest`/`Collection` structs + all request SQL (list/get/upsert) and collection SQL. Core `openapi.rs`: import maps `operation.description`→request and `info.description`→collection; export emits both (signature now `export_openapi(name, description, reqs)`); tests updated. `openapi_ops.rs` wires import/export through. New `set_collection_description` Db method + Tauri command (registered). MCP `create_request`/`update_request` gained optional `description`. Frontend: `description` on `HttpRequest`/`SavedSnap` types, normalize/snap/dirty tracking, new **Overview** request tab (textarea bound to `draft.description`, dirty-dot, saved via existing `upsert_request`), CSS `.overview-pane`. Rebuilt MCP bundle. All checks pass (`cargo test -p inpost-core`, `tsc --noEmit`, `cargo build -p inpost`).
+**Needs next:** No collection detail view exists to surface `collections.description` editing in the UI — backend/command ready, UI wiring is a follow-up. Overview is a plain textarea; Markdown rendering deferred.
+
+### 2026-07-25 — Params column label alignment
+**User asked:** PARAM / VALUE / DESCRIPTION labels not aligned with their input fields (twice — first pass still off).  
+**Did:** Two causes: (1) head vs row had different trailing column widths (`minmax(96px,auto)` for Bulk edit vs `28px` for ×); (2) the follow-up `padding-right: 108px` on the header squeezed its grid narrower than the rows. Final: ···/Bulk edit live in their own `.kv-toolbar` row above the header, header and rows share the identical grid (`28px 1fr 1.4fr [1fr] 28px`), labels inset 10px to match input text.  
+**Needs next:** Phase 3 sync spike.
+
+### 2026-07-25 — Resolved URL on status bar
+**User asked:** Show the resolved URL on the status bar too, like the breadcrumb.  
+**Did:** Status bar right slot now renders `resolvedUrl` (same `resolveRequestUrl` memo the crumb uses — env vars + path placeholders applied) instead of the raw `composedUrl`, with the full string in a `data-tip` since it truncates.  
+**Needs next:** Phase 3 sync spike.
+
+### 2026-07-25 — OpenAPI docs/overview research
+**User asked:** Research what OpenAPI documentation/overview fields we import/export/store and gaps for editable Overview UI that round-trips.  
+**Did:** Research only. Core import/export is minimal path→request (`openapi.rs`); no description/docs columns in DB; request tabs are Params/Headers/Body/Auth only (no Overview); param Description UI is ephemeral. Full gap map + first-slice recommendation in chat report.  
+**Needs next:** If building: migrate `requests.description` (+ optional `collections.description`), Overview tab, wire import/export; later param/response/schema docs.
+
+### 2026-07-25 — Params tools + conditional path variables
+**User asked:** Only show Path variables when placeholders exist; add `…`, Bulk edit, and a hidden Description column that can be enabled.  
+**Did:** Params Query table now has `…` → Description toggle and Bulk edit (`key:value`, one per line). Description adds an editable column; Path variables render only when the URL contains `{name}` / `:name` and get the same Description toggle (no bulk edit because keys are URL-derived).  
+**Needs next:** Persist optional param descriptions if request metadata storage is expanded; Phase 3 sync spike.
+
+### 2026-07-25 — Boxy multipart form-data body
+**User asked:** Work on boxy multipart/form-data (Text/File rows like the screenshot).  
+**Did:** `MultipartTable` — card rows with enable · key · Text/File select · value or Choose file · trash. Body pairs JSON keeps `{key,value,type}`; send still flattens to `(k,v)` for Rust. `httputil::parse_kv_pairs` accepts tuple + object forms (bridge/OpenAPI). File pick stores display name only — wire bytes still deferred.  
+**Needs next:** Multipart file bytes on send; Phase 3 sync spike.
+
+### 2026-07-25 — Custom header suggest input
+**User asked:** Header name datalist/select design is crap — make a custom input.  
+**Did:** Replaced native `<datalist>` with `SuggestInput` in `ui.tsx`: filtered menu (prefix-first), match highlight, ↑↓/Enter/Tab/Esc, portaled fixed menu so it isn’t clipped by the headers pane. PairTable header keys use it.  
+**Needs next:** Phase 3 sync spike.
+
+### 2026-07-25 — Response Headers scroll
+**User asked:** Response Headers tab has no scroll (long lists clipped).  
+**Did:** `.response-pane > .kv-table.read-only` gets `flex:1; min-height:0; overflow:auto` so the header list scrolls inside the pane. Long values wrap (`word-break`) instead of ellipsizing off-screen.  
+**Needs next:** Phase 3 sync spike.
+
+### 2026-07-25 — URL bar undo/redo
+**User asked:** URL bar has no undo/redo for typed, overridden, cleaned, or deleted text.  
+**Did:** Same pattern as search — controlled `UrlField` keeps its own undo/redo stack (`Ctrl+Z` / `Ctrl+Shift+Z` / `Ctrl+Y`). Covers typing and external rewrites (Params sync). Stack resets on `historyKey` (selected request) so tab switches don’t leak history.  
+**Needs next:** Phase 3 sync spike.
+
+### 2026-07-25 — Resolved URL preview in crumb
+**User asked:** After the request title (e.g. Type — Flying), show the actual rendered URI with vars parsed.  
+**Did:** Added `substituteVars` / `applyPathVars` / `resolveRequestUrl` in `envVar.ts` (same order as Rust send: env-sub path values → path placeholders → env-sub URL). Crumb row now shows the live resolved URL after the title (mono, truncated, full string in tip). Updates as env/path/query/URL change.  
+**Needs next:** Phase 3 sync spike.
+
+### 2026-07-25 — Sync Params ↔ URL bar
+**User asked:** Params edits don’t update the URL bar (Requestly shows `?key` live).  
+**Did:** UrlField now binds to `composedUrl` (`joinUrl(urlBase, query)`) instead of bare `urlBase`. Typing in the bar runs `splitUrl` → updates both base and query (and path pairs from the base). Editing/adding/disabling Params immediately rewrites the `?…` in the URL.  
+**Needs next:** Phase 3 sync spike.
+
+### 2026-07-25 — Search bar undo + gentler Backspace
+**User asked:** Undo doesn’t work on the search bar; Backspace sometimes wipes the filter chip.  
+**Did:** Controlled input + chips break the browser undo stack — added a query undo/redo stack (`Ctrl+Z` / `Ctrl+Shift+Z` / `Ctrl+Y`) covering typing, chips, clear, and suggestion commits. Empty-input Backspace now *uncommits* the last chip back to editable text (`in:Foo`) via `uncommitLastChip()` instead of deleting it; further Backspaces edit char-by-char, and undo restores the chip.  
+**Needs next:** Phase 3 sync spike.
+
+### 2026-07-25 — Collection ··· Export as OpenAPI 3.0
+**User asked:** Add export to the collection ··· menu; OpenAPI 3.0 only, in the correct format so exported files re-import.  
+**Did:** Collection More menu now has **Export as OpenAPI 3.0** (Rename · Export · Delete), targeting that specific collection (`exportOpenApi(id)`; menu height bumped). Export is faithful per body type: `ExportRequest` gained `body_type` + `body_pairs_json`; new `request_body_for()` emits `application/json` (parsed example), `text/plain`, or form `schema.properties` + `example` for `x-www-form-urlencoded` / `multipart/form-data`; `none` omits `requestBody`. `openapi_ops::export_from_db` passes the new fields. Tests: round-trip asserts JSON requestBody; `export_form_body_content_type` asserts urlencoded schema/example.  
+**Needs next:** Phase 3 sync spike.
+
+### 2026-07-25 — Request/response tabs Phase A–C
+**User asked:** Implement request & response tabs gap plan (body types → Auth → polish).  
+**Did:** Schema: `body_type`, `body_pairs_json`, `auth_type`, `auth_json`, `path_vars_json`; history `headers_json`. Core `httputil` encode/auth/path + tests. UI: Body type radios, Auth tab, Params Query+Path, header datalist autocomplete, response History tab; Content-Type sync; send/MCP apply auth+forms. OpenAPI maps body types. MCP create/update accept new fields. `src/reqMeta.ts` self-check in `npm run check`.  
+**Needs next:** Phase 3 sync spike; scripts/OAuth/cookies later.
+
+### 2026-07-25 — Scope suggestions in global search
+**User asked:** Typing `in:` / `from:` should show the matching values first; it wasn’t working (`in:moves` dead-ended because Moves is a folder, not a collection).  
+**Did:** `trailingScope()` + `scopeSuggestions()` in `searchQuery.ts`: a half-typed `key:value` lists the real values from the index (workspaces for `from:`, collections for `in:`, folders for `folder:`), narrowed by the chips already set. When the typed key has no match it falls back to the other keys, so `in:moves` offers `folder:Moves`. Palette shows them as the first group; ↑↓ spans suggestions + hits, Enter/Tab commits the chip, Enter on a hit still opens it. Asserts added to the `searchQuery` self-check.  
+**Needs next:** Phase 3 sync spike.
+
+### 2026-07-25 — Search tabs keyboard nav
+**User asked:** Arrow keys should move selection in Search tabs; Enter opens the highlighted tab (keyboard-focused).  
+**Did:** ↑/↓ cycle highlight (wraps), Enter opens highlighted match, typing resets highlight to first; mouse hover also moves highlight; `.kbd` style + scroll-into-view.  
+**Needs next:** Phase 3 sync spike.
+
+### 2026-07-25 — Search tabs + fixed env width
+**User asked:** Add Search tabs (like the screenshot); make env picker a fixed width so long/short names don’t shift layout, truncate with ….  
+**Did:** Chevron after `+` opens a Search tabs popover (filter + method/name/dirty; Enter picks first; Esc/outside closes). Shortcut `Ctrl+Shift+A` (`searchTabs` in `shortcuts.ts`). Env select locked to `152px` with ellipsis on the trigger and menu options.  
+**Needs next:** Phase 3 sync spike.
+
+### 2026-07-25 — API client editor feature research
+**User asked:** Research request/response editor tabs/fields in Hoppscotch, Insomnia, Bruno, Yaak + Postman-like norms; MVP vs later split.  
+**Did:** Consolidated checklist from docs/source (Bruno `.bru` schema, Hoppscotch types, Insomnia/Yaak panes, Postman response viewer). No code changes.  
+**Needs next:** Use checklist when expanding request/response editor; Auth/scripts/GraphQL still backlog.
+
+### 2026-07-25 — Hide tab strip scrollbar
+**User asked:** The scrollbar makes the tab navigation bad UI.  
+**Did:** Hid the tab strip scrollbar entirely (`scrollbar-width: none` + `::-webkit-scrollbar { display: none }`) like browser tab bars. Kept it navigable: plain vertical wheel now scrolls the strip horizontally, and the active tab auto-scrolls into view on switch/open (`scrollIntoView` effect in `App.tsx`).  
+**Needs next:** Phase 3 sync spike.
+
+### 2026-07-25 — Env dropdown on tab bar (browser +)
+**User asked:** Move env dropdown after the + on the tab bar; + follows last tab and stays at the end when tabs overflow (browser-like).  
+**Did:** Removed env picker from the URL bar. Tab strip is now `[tabs…][+ sticky] | [env]`. `+` lives inside the scroll row (`position: sticky; right: 0`) so it rides after the last tab and pins at the trailing edge when there’s no room. Env select pinned after the scroll area.  
+**Needs next:** Phase 3 sync spike.
+
+### 2026-07-25 — Scrub proprietary MCP product name from docs
+**User asked:** Remove any references given to that closed desktop API client project from docs/code.  
+**Did:** Scrubbed from README, PRD, MCP.md, ARCHITECTURE, TRACE history, `bridge.rs`, `mcp/src/index.ts`; MCP docs describe Inpost’s own localhost bridge + Requestly packaging only.  
+**Needs next:** Phase 3 sync spike.
 
 ### 2026-07-25 — Left-align workspace trigger name
 **User asked:** Workspace name left aligned in the top bar.  
@@ -320,7 +519,7 @@
 **Needs next:** Phase 3 sync spike.
 
 ### 2026-07-24 — Scoped global search
-**User asked:** Search inside workspace/collection/folder (`from:` / `in:` / `folder:`) like Postman/Outpost.  
+**User asked:** Search inside workspace/collection/folder (`from:` / `in:` / `folder:`) like Postman/Requestly.  
 **Did:** Palette under titlebar search; scopes `in:collection`, `folder:name`, `from:workspace` (+ quoted values); chips; keyboard nav; opens request/collection/folder; indexes all local workspaces; `searchQuery.ts` self-check in `npm run check`.  
 **Needs next:** Phase 3 sync spike.
 
@@ -335,13 +534,13 @@
 **Needs next:** Phase 3 sync spike.
 
 ### 2026-07-24 — Workspace picker in titlebar
-**User asked:** Move workspace choosing/search to top nav after Inpost (Outpost/Requestly/Postman style).  
+**User asked:** Move workspace choosing/search to top nav after Inpost (Requestly/Postman style).  
 **Did:** Local `workspaces` table; collections scoped by `workspaceId`; titlebar picker with “Search workspaces…” + create; sidebar keeps env only (no duplicate brand); MCP `list_workspaces`/`create_workspace`; OpenAPI import takes workspace.  
 **Needs next:** Phase 3 sync spike.
 
-### 2026-07-24 — Tree UX vs Requestly/Outpost
-**User asked:** (screenshots) Inpost sidebar vs Requestly/Outpost nested trees.  
-**Did:** Fixed folder rows crushed by `.tree button { width:100% }` (carets with no names); collection as tree root; compact Import/Export links; Outpost-style path crumb; DEL short labels.  
+### 2026-07-24 — Tree UX vs Requestly
+**User asked:** (screenshots) Inpost sidebar vs Requestly nested trees.  
+**Did:** Fixed folder rows crushed by `.tree button { width:100% }` (carets with no names); collection as tree root; compact Import/Export links; path crumb; DEL short labels.  
 **Needs next:** Workspaces or Phase 3 sync spike.
 
 ### 2026-07-24 — Phase 2 folders + drag-reorder
@@ -369,19 +568,19 @@
 **Did:** OpenAPI import/export in `inpost-core`; Tauri commands; bridge + MCP `import_openapi`/`export_openapi`; sidebar Import/Export UI; tests in `npm run check`.  
 **Needs next:** Folders/reorder or Phase 3 sync spike.
 
-### 2026-07-24 — Outpost stdio.mjs ethics
-**User asked:** Is referencing Outpost’s `stdio.mjs` unprofessional?  
-**Did:** Clarified: study pattern OK; do not copy proprietary file. We use own MCP + Requestly-style SDK.  
+### 2026-07-24 — MCP stdio packaging ethics
+**User asked:** Is copying a proprietary third-party `stdio.mjs` unprofessional?  
+**Did:** Clarified: study patterns OK; do not copy proprietary files. We use our own MCP + Requestly-style SDK.  
 **Needs next:** —
 
 ### 2026-07-24 — Phase 1 MCP
-**User asked:** Start Phase 1; check Outpost MCP file + open-source MCP repos.  
-**Did:** Inspected Outpost `session.json` + stdio bridge pattern; Requestly `mcp` (MIT, remote API). Implemented localhost HTTP bridge (`tiny_http`), `session.json`, Node `mcp/` → `stdio.mjs`, tools (collections/requests/envs/`run_request`). Docs: `docs/MCP.md`.  
+**User asked:** Start Phase 1; check open-source MCP repos + localhost bridge pattern.  
+**Did:** Designed `session.json` + stdio→localhost bridge; studied Requestly `mcp` (MIT, remote API). Implemented localhost HTTP bridge (`tiny_http`), `session.json`, Node `mcp/` → `stdio.mjs`, tools (collections/requests/envs/`run_request`). Docs: `docs/MCP.md`.  
 **Needs next:** MCP settings UI (optional); OpenAPI was next and is now done.
 
 ### 2026-07-24 — Workspace hierarchy Q
 **User asked:** Multiple workspaces, collections inside — is that standard?  
-**Did:** Confirmed Workspace → Collection → Request is standard (Postman/Requestly/Yaak/Outpost). Inpost still single implicit workspace.  
+**Did:** Confirmed Workspace → Collection → Request is standard (Postman/Requestly/Yaak). Inpost still single implicit workspace.  
 **Needs next:** Implement workspaces when prioritized.
 
 ### 2026-07-24 — “What’s next per plan?”
@@ -430,7 +629,7 @@
 **Needs next:** —
 
 ### 2026-07-24 — PRD + project init
-**User asked:** Create PRD and init project (Yaak-like, Outpost feature parity later; local-first).  
+**User asked:** Create PRD and init project (Yaak-like architecture; local-first).  
 **Did:** `docs/PRD.md`, Tauri+React scaffold, SQLite, HTTP send, envs, MIT, `inpost-core` envsubst tests, README/AGENTS restored after scaffold wipe.  
 **Needs next:** Phased build (now through Phase 2 core).
 

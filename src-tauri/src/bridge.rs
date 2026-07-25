@@ -1,4 +1,4 @@
-//! Localhost HTTP bridge for MCP stdio proxy (Outpost-style).
+//! Localhost HTTP bridge for MCP stdio proxy.
 //! Desktop app must be running; agents talk stdio → session.json → this bridge.
 
 use std::collections::{HashMap, VecDeque};
@@ -111,7 +111,7 @@ fn write_session(bridge_url: &str, token: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// Copy bundled stdio.mjs next to session.json (refreshed each launch, like Outpost).
+/// Copy bundled stdio.mjs next to session.json (refreshed each launch).
 pub fn install_stdio_bundle(resource_stdio: &std::path::Path) -> Result<std::path::PathBuf, String> {
     let dir = mcp_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -218,11 +218,43 @@ fn handle(
             struct Body {
                 name: String,
                 workspace_id: String,
+                #[serde(default)]
+                description: String,
             }
             match read_body(&mut request).and_then(|b| {
                 serde_json::from_slice::<Body>(&b).map_err(|e| e.to_string())
             }) {
                 Ok(b) => match db.create_collection(b.name, b.workspace_id) {
+                    Ok(v) => {
+                        if b.description.trim().is_empty() {
+                            json_ok(v)
+                        } else {
+                            match db.set_collection_description(&v.id, b.description) {
+                                Ok(updated) => json_ok(updated),
+                                Err(e) => json_err(500, e),
+                            }
+                        }
+                    }
+                    Err(e) => json_err(500, e),
+                },
+                Err(e) => json_err(400, e),
+            }
+        }
+        (&Method::Patch, p)
+            if p.starts_with("/v1/collections/")
+                && !p.ends_with("/requests")
+                && !p.ends_with("/folders") =>
+        {
+            let id = p.trim_start_matches("/v1/collections/");
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Body {
+                description: String,
+            }
+            match read_body(&mut request).and_then(|b| {
+                serde_json::from_slice::<Body>(&b).map_err(|e| e.to_string())
+            }) {
+                Ok(b) => match db.set_collection_description(id, b.description) {
                     Ok(v) => json_ok(v),
                     Err(e) => json_err(500, e),
                 },
@@ -488,6 +520,9 @@ fn run_request(
     }
     let headers: Vec<(String, String)> =
         serde_json::from_str(&req.headers_json).unwrap_or_default();
+    let body_pairs = inpost_core::httputil::parse_kv_pairs(&req.body_pairs_json);
+    let path_vars: Vec<(String, String)> =
+        serde_json::from_str(&req.path_vars_json).unwrap_or_default();
     let result = http_exec::send(SendRequestInput {
         method: req.method.clone(),
         url: req.url.clone(),
@@ -497,6 +532,11 @@ fn run_request(
         } else {
             Some(req.body.clone())
         },
+        body_type: req.body_type.clone(),
+        body_pairs,
+        auth_type: req.auth_type.clone(),
+        auth_json: req.auth_json.clone(),
+        path_vars,
         active_vars: active,
         global_vars: global,
     });
@@ -521,6 +561,7 @@ fn run_request(
                 error: None,
                 body: Some(r.body.clone()),
                 body_pretty: r.body_pretty.clone(),
+                headers_json: Some(serde_json::to_string(&r.headers).unwrap_or_else(|_| "[]".into())),
                 created_at,
             },
             Err(e) => HistoryEntry {
@@ -536,6 +577,7 @@ fn run_request(
                 error: Some(e.clone()),
                 body: None,
                 body_pretty: None,
+                headers_json: None,
                 created_at,
             },
         };

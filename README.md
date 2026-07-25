@@ -14,7 +14,7 @@ Prerequisites: [Tauri Linux deps](https://tauri.app/start/prerequisites/) (or ma
 
 ```bash
 npm install
-npm run build:mcp   # Outpost-style stdio MCP bundle
+npm run build:mcp   # bundled stdio MCP (Node → app-data)
 npm run tauri dev
 ```
 
@@ -45,7 +45,7 @@ Keep **Inpost running**, then point your MCP client at the copied stdio script (
 }
 ```
 
-See [docs/MCP.md](docs/MCP.md) for Outpost/Requestly notes and tool list.
+See [docs/MCP.md](docs/MCP.md) for bridge notes, Requestly packaging refs, and tool list.
 
 ## License
 

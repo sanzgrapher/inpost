@@ -21171,6 +21171,21 @@ function toolText(data) {
 }
 
 // src/tools.ts
+var DOC_FIELD_GUIDE = [
+  "Documentation is CommonMark Markdown stored as a plain string.",
+  "OpenAPI mapping: request.description \u2192 operation.description; collection.description \u2192 info.description.",
+  "ALLOWED: # headings, paragraphs, **bold**, *italic*, ~~strike~~, -/* lists, 1. numbered lists, > quotes,",
+  "`inline code`, fenced ```code blocks```, [links](https://\u2026), ![images](https://\u2026) via remote URL only, --- rules.",
+  "NOT AVAILABLE: raw HTML/script (escaped, never executed); Editor.js / rich-text JSON; uploaded or pasted image files",
+  "(no local image hosting \u2014 use https URLs); folder-level docs; structured OpenAPI schemas/examples inside the field",
+  "(use request body/headers/auth fields for those). Empty string clears the docs."
+].join(" ");
+var descriptionParam = external_exports.string().optional().describe(
+  "Markdown documentation for this request (OpenAPI operation.description). " + DOC_FIELD_GUIDE
+);
+var collectionDescriptionParam = external_exports.string().describe(
+  "Markdown documentation for this collection (OpenAPI info.description). " + DOC_FIELD_GUIDE
+);
 function registerTools(server2) {
   server2.tool(
     "list_workspaces",
@@ -21186,7 +21201,7 @@ function registerTools(server2) {
   );
   server2.tool(
     "list_collections",
-    "List collections in a workspace (or all if workspaceId omitted)",
+    "List collections in a workspace (or all if workspaceId omitted). Each row includes description (Markdown / OpenAPI info.description).",
     { workspaceId: external_exports.string().optional() },
     async ({ workspaceId }) => toolText(
       await bridge(
@@ -21197,18 +21212,36 @@ function registerTools(server2) {
   );
   server2.tool(
     "create_collection",
-    "Create a collection in a workspace",
+    "Create a collection in a workspace. Optional description is collection-level documentation. " + DOC_FIELD_GUIDE,
     {
       name: external_exports.string().min(1).max(200),
-      workspaceId: external_exports.string().min(1)
+      workspaceId: external_exports.string().min(1),
+      description: collectionDescriptionParam.optional()
     },
-    async ({ name, workspaceId }) => toolText(
-      await bridge("POST", "/v1/collections", { name, workspaceId })
+    async ({ name, workspaceId, description }) => toolText(
+      await bridge("POST", "/v1/collections", {
+        name,
+        workspaceId,
+        description: description ?? ""
+      })
+    )
+  );
+  server2.tool(
+    "set_collection_description",
+    "Set or clear a collection's documentation (shown in the app Docs tab; exports as OpenAPI info.description). " + DOC_FIELD_GUIDE,
+    {
+      collectionId: external_exports.string().min(1),
+      description: collectionDescriptionParam
+    },
+    async ({ collectionId, description }) => toolText(
+      await bridge("PATCH", `/v1/collections/${collectionId}`, {
+        description
+      })
     )
   );
   server2.tool(
     "list_requests",
-    "List requests in a collection",
+    "List requests in a collection (includes description Markdown when set)",
     { collectionId: external_exports.string().min(1) },
     async ({ collectionId }) => toolText(
       await bridge("GET", `/v1/collections/${collectionId}/requests`)
@@ -21276,20 +21309,26 @@ function registerTools(server2) {
   );
   server2.tool(
     "get_request",
-    "Get a request by id",
+    "Get a request by id (includes description Markdown / OpenAPI operation.description when set)",
     { requestId: external_exports.string().min(1) },
     async ({ requestId }) => toolText(await bridge("GET", `/v1/requests/${requestId}`))
   );
   server2.tool(
     "create_request",
-    "Create an HTTP request",
+    "Create an HTTP request. Optional description is request documentation shown in Overview. " + DOC_FIELD_GUIDE,
     {
       collectionId: external_exports.string().min(1),
       name: external_exports.string().min(1).max(200),
+      description: descriptionParam,
       method: external_exports.string().default("GET"),
       url: external_exports.string().min(1),
       headersJson: external_exports.string().optional(),
       body: external_exports.string().optional(),
+      bodyType: external_exports.string().optional(),
+      bodyPairsJson: external_exports.string().optional(),
+      authType: external_exports.string().optional(),
+      authJson: external_exports.string().optional(),
+      pathVarsJson: external_exports.string().optional(),
       folderId: external_exports.string().optional()
     },
     async (args) => {
@@ -21298,35 +21337,61 @@ function registerTools(server2) {
         collectionId: args.collectionId,
         folderId: args.folderId ?? null,
         name: args.name,
+        description: args.description ?? "",
         method: args.method || "GET",
         url: args.url,
         headersJson: args.headersJson ?? "[]",
-        body: args.body ?? ""
+        body: args.body ?? "",
+        bodyType: args.bodyType ?? (args.body ? "json" : "none"),
+        bodyPairsJson: args.bodyPairsJson ?? "[]",
+        authType: args.authType ?? "none",
+        authJson: args.authJson ?? "{}",
+        pathVarsJson: args.pathVarsJson ?? "[]"
       };
       return toolText(await bridge("POST", "/v1/requests", row));
     }
   );
   server2.tool(
     "update_request",
-    "Update an HTTP request",
+    'Update an HTTP request. Omit description to keep existing docs; pass description (including "") to set/clear. ' + DOC_FIELD_GUIDE,
     {
       requestId: external_exports.string().min(1),
       collectionId: external_exports.string().min(1),
       name: external_exports.string().min(1).max(200),
+      description: descriptionParam,
       method: external_exports.string(),
       url: external_exports.string().min(1),
       headersJson: external_exports.string().optional(),
-      body: external_exports.string().optional()
+      body: external_exports.string().optional(),
+      bodyType: external_exports.string().optional(),
+      bodyPairsJson: external_exports.string().optional(),
+      authType: external_exports.string().optional(),
+      authJson: external_exports.string().optional(),
+      pathVarsJson: external_exports.string().optional()
     },
     async (args) => {
+      let description = args.description;
+      if (description === void 0) {
+        const existing = await bridge(
+          "GET",
+          `/v1/requests/${args.requestId}`
+        );
+        description = existing.description ?? "";
+      }
       const row = {
         id: args.requestId,
         collectionId: args.collectionId,
         name: args.name,
+        description,
         method: args.method,
         url: args.url,
         headersJson: args.headersJson ?? "[]",
-        body: args.body ?? ""
+        body: args.body ?? "",
+        bodyType: args.bodyType ?? (args.body ? "json" : "none"),
+        bodyPairsJson: args.bodyPairsJson ?? "[]",
+        authType: args.authType ?? "none",
+        authJson: args.authJson ?? "{}",
+        pathVarsJson: args.pathVarsJson ?? "[]"
       };
       return toolText(
         await bridge("PUT", `/v1/requests/${args.requestId}`, row)
@@ -21395,7 +21460,7 @@ function registerTools(server2) {
   );
   server2.tool(
     "set_active_environment",
-    "Set the active environment",
+    "Change the UI's active (non-global) environment. Prefer run_request({ environmentId }) when you only need one-off Local vs Prod runs \u2014 that does not flip the active env.",
     { environmentId: external_exports.string().min(1) },
     async ({ environmentId }) => toolText(
       await bridge("POST", `/v1/environments/${environmentId}/activate`)
@@ -21403,10 +21468,20 @@ function registerTools(server2) {
   );
   server2.tool(
     "run_request",
-    "Execute an HTTP request via the desktop app (uses active env unless environmentId given)",
+    [
+      "Execute a saved HTTP request via the desktop app.",
+      "Vars: Global env always merges in; the chosen non-global env supplies {{var}} / path values.",
+      "Pass environmentId to run against that env for this call only (does NOT change the UI active env).",
+      "Omit environmentId to use whatever is currently active.",
+      "Compare Local vs Prod: call run_request twice with the same requestId and different environmentIds",
+      "(from list_environments); compare status, resolvedUrl, and body in the two results.",
+      "Both runs appear in History."
+    ].join(" "),
     {
-      requestId: external_exports.string().min(1),
-      environmentId: external_exports.string().optional()
+      requestId: external_exports.string().min(1).describe("Id from list_requests / get_request"),
+      environmentId: external_exports.string().optional().describe(
+        "Non-global environment id from list_environments. Omit = use active env. Pass Local id then Prod id on two calls to compare the same request."
+      )
     },
     async ({ requestId, environmentId }) => toolText(
       await bridge("POST", "/v1/run", {
@@ -21417,7 +21492,7 @@ function registerTools(server2) {
   );
   server2.tool(
     "import_openapi",
-    "Import an OpenAPI 3.x JSON/YAML spec into a new collection",
+    "Import an OpenAPI 3.x JSON/YAML spec into a new collection. Maps info.description \u2192 collection docs and operation.description \u2192 each request's description (Markdown).",
     {
       spec: external_exports.string().min(1),
       workspaceId: external_exports.string().min(1)
@@ -21428,7 +21503,7 @@ function registerTools(server2) {
   );
   server2.tool(
     "export_openapi",
-    "Export a collection as OpenAPI 3.0.3 JSON",
+    "Export a collection as OpenAPI 3.0.3 JSON (includes collection description as info.description and each request description as operation.description)",
     { collectionId: external_exports.string().min(1) },
     async ({ collectionId }) => toolText(
       await bridge("POST", "/v1/openapi/export", { collectionId })

@@ -2,7 +2,7 @@
 
 **Status:** Draft v0.1  
 **Owner:** Inpost  
-**Last updated:** 2026-07-24  
+**Last updated:** 2026-07-25  
 **Working title:** Inpost (local-first counterpart to cloud/account-gated clients)
 
 ---
@@ -18,7 +18,7 @@ A desktop API client (Postman/Bruno/Yaak-class) built on **Rust + Tauri**, with:
 
 **Build strategy:** iterative and incremental. Ship a thin local HTTP request/response core first, then MCP, then sync, then multi-user/presence — in that order.
 
-**Philosophy:** We do not invent what we can study. Closest architectural reference is [Yaak](https://github.com/mountain-loop/yaak) (Tauri + Rust + React). Feature/UX parity target for sync + MCP is [Outpost](https://outpost-api-client.vercel.app/) — treat Outpost as a closed product reference, not a fork target (no public repo). Prefer reuse of existing sync engines over a hand-rolled CRDT.
+**Philosophy:** We do not invent what we can study. Closest architectural reference is [Yaak](https://github.com/mountain-loop/yaak) (Tauri + Rust + React). Primary UX reference is [Requestly](https://requestly.com/). Prefer reuse of existing sync engines over a hand-rolled CRDT.
 
 ---
 
@@ -32,9 +32,9 @@ Existing tools force a tradeoff:
 | Yaak | Yes | Yes | Deprecated MCP → CLI-only | No | Yes (MIT) |
 | Vaxtly | Yes, no account | Unknown | Yes (MIT, bidirectional) | No | Yes |
 | Postman | No (cloud) | No (Electron) | Yes (hosted, mature) | Yes | No |
-| Outpost | No (account required) | Yes (Tauri/Rust) | Yes (48 tools, local stdio) | Yes | Unknown / likely closed |
+| Requestly | Partial | No (Electron) | Yes (open MIT SDK) | Cloud | Hub open; client closed |
 
-No existing open-source tool combines Yaak’s speed, Vaxtly’s no-account philosophy, Outpost’s multi-user sync, and Postman’s MCP maturity. That combination is the target.
+No existing open-source tool combines Yaak’s speed, Vaxtly’s no-account philosophy, mature multi-user sync, and Postman’s MCP surface. That combination is the target.
 
 ---
 
@@ -101,9 +101,9 @@ No existing open-source tool combines Yaak’s speed, Vaxtly’s no-account phil
 Key design decisions:
 
 - **Local-first by construction.** The Rust core never requires the sync server. Sync is an additional writer/reader on the same local SQLite tables.
-- **MCP runs locally, stdio-based**, refreshed from the app’s own tool registry on launch (mirrors [Outpost’s MCP setup](https://outpost-api-client.vercel.app/docs/mcp-setup)) so new tools appear automatically as the app grows.
-- **Secrets never leave the device.** Only env *keys and types* sync; values stay local (same model Outpost documents for environments).
-- **Study Yaak’s shell, don’t clone Outpost.** Yaak (`mountain-loop/yaak`) is the closest Tauri/Rust/React match. Outpost is the feature/UX parity reference for sync + agent surface; source availability unconfirmed.
+- **MCP runs locally, stdio-based**, refreshed from the app’s own tool registry on launch so new tools appear automatically as the app grows.
+- **Secrets never leave the device.** Only env *keys and types* sync; values stay local.
+- **Study Yaak’s shell.** Yaak (`mountain-loop/yaak`) is the closest Tauri/Rust/React match for architecture.
 
 ---
 
@@ -119,7 +119,7 @@ Key design decisions:
 
 ### Phase 1 — MCP layer ← in progress
 
-- Local stdio MCP server bundled with the app (**Outpost bridge pattern** + Requestly SDK packaging).
+- Local stdio MCP server bundled with the app (**localhost HTTP bridge** + Requestly SDK packaging).
 - Tools exposed to agents (Phase 1 set):
   - `create_request` / `update_request` / `delete_request` / `get_request` / `list_requests`
   - `list_collections` / `create_collection`
@@ -167,7 +167,7 @@ Do **not** hand-roll the queue-and-flush-with-conflict-UI engine first. Evaluate
 | **Zero (Rocicorp)** | Newer; evaluate against the above. |
 | **CRDT libs** (Loro, Yjs, Automerge) | More control, more work. Use only if we specifically want to own conflict semantics. |
 
-**v1 conflict policy:** auto-merge non-overlapping field changes; last-write-wins with a review queue for true field-level conflicts (mirrors Outpost’s documented model).
+**v1 conflict policy:** auto-merge non-overlapping field changes; last-write-wins with a review queue for true field-level conflicts.
 
 Phase 4 presence/roles should use a thin realtime backend (Supabase Realtime, PartyKit, or Ably) + Postgres tables — not custom infra.
 
@@ -181,7 +181,7 @@ Confirm license terms before reusing code verbatim.
 |---|---|
 | **[Requestly](https://requestly.com/)** | **Primary UX/UI reference** for Phase 0 shell: light three-pane layout, icon rail, collection tree, request/response split, local history banner, keyboard shortcuts. API Client app is proprietary ([community hub](https://github.com/requestly/requestly) only) — study screenshots/flow, do not fork. |
 | **[Yaak](https://github.com/mountain-loop/yaak)** | **Primary architecture reference.** Tauri + Rust + React, SQLite models, HTTP execution, IPC boundary. Study crate split (`yaak-models`, `yaak-http`, Tauri-agnostic core). Note: Yaak deprecated in-app MCP in favor of a standalone CLI — study that transition before locking our MCP vs CLI choice (we still prefer bundled stdio MCP for Phase 1). |
-| **[Outpost](https://outpost-api-client.vercel.app/)** | **Feature/UX parity reference** for offline sync, conflict review, env secrets model, and local stdio MCP. Docs: [Getting started](https://outpost-api-client.vercel.app/docs/getting-started), [MCP setup](https://outpost-api-client.vercel.app/docs/mcp-setup). No public repo — not a fork target. |
+| **[Requestly MCP](https://github.com/requestly/mcp)** | **MCP packaging reference** (MIT): `McpServer` + `StdioServerTransport` + `registerTools`, esbuild single-file bundle. |
 | **Bruno** | Plain-text collection / Git-native workflow reference. |
 | **Vaxtly** | Philosophy: no-account, MIT, bidirectional MCP, secrets redacted on read. |
 | **Postman** | Mature MCP tool-surface design (hosted). |
@@ -199,7 +199,7 @@ Sync: PowerSync, ElectricSQL, Zero. Realtime: Supabase Realtime, PartyKit, Ably.
 | Frontend | **React + TypeScript** | Match Yaak; team familiarity default |
 | Local storage | SQLite via `rusqlite` | Yaak-proven; simple for Phase 0 |
 | HTTP | `reqwest` in Rust | Execution stays in the core, not the webview |
-| MCP (Phase 1) | Rust stdio, bundled with app | Outpost-style local MCP |
+| MCP (Phase 1) | Localhost bridge + bundled Node stdio | Agent shares live app SQLite / send path |
 | Sync (Phase 3) | Postgres + PowerSync **or** ElectricSQL | Spike before committing |
 | License | **MIT** | Align with Vaxtly / open-source goal |
 | CI/CD | GitHub Actions (post–Phase 0 stable) | Matrix: Linux / macOS / Windows |
@@ -220,7 +220,7 @@ Sync: PowerSync, ElectricSQL, Zero. Realtime: Supabase Realtime, PartyKit, Ably.
 | # | Question | Current lean |
 |---|---|---|
 | 1 | Frontend: React vs Vue vs Svelte? | **React** (Yaak match) — decided for init |
-| 2 | MCP: stdio only vs also remote/HTTP later? | **stdio first** (Outpost-like); remote later if needed |
+| 2 | MCP: stdio only vs also remote/HTTP later? | **stdio first** (localhost bridge); remote later if needed |
 | 3 | Sync engine: PowerSync vs ElectricSQL vs Zero? | Spike in Phase 3; no commit yet |
 | 4 | License: MIT vs Yaak-style commercial? | **MIT** — decided for init |
 | 5 | Conflict default: LWW vs mandatory review? | Auto-merge non-overlap; LWW + review queue for true conflicts; make LWW vs force-review configurable later |
@@ -229,7 +229,7 @@ Sync: PowerSync, ElectricSQL, Zero. Realtime: Supabase Realtime, PartyKit, Ably.
 
 ## 13. Build Sequence
 
-1. Study Yaak’s Tauri + Rust shell structure (crate boundaries, IPC, models). Do not fork Outpost.
+1. Study Yaak’s Tauri + Rust shell structure (crate boundaries, IPC, models).
 2. **Phase 0** — local single-user HTTP client end-to-end; get it fast and stable. ← **we are here**
 3. Phase 1 — MCP on top of the working local core.
 4. Phase 2 — OpenAPI import/export.
@@ -250,17 +250,17 @@ Sync: PowerSync, ElectricSQL, Zero. Realtime: Supabase Realtime, PartyKit, Ably.
 
 ---
 
-## Appendix A — Outpost MCP layout (reference)
+## Appendix A — Inpost MCP layout
 
-Outpost refreshes a stdio bundle under app data on each launch; config is copied from **Profile → Personal settings → MCP**. Typical paths:
+On each launch the app refreshes a stdio bundle under app data; config is copied from **Settings → MCP**. Paths:
 
 | OS | Path |
 |---|---|
-| Linux | `~/.local/share/com.outpost.desktop/mcp/stdio.mjs` |
-| macOS | `~/Library/Application Support/com.outpost.desktop/mcp/stdio.mjs` |
-| Windows | `%APPDATA%\com.outpost.desktop\mcp\stdio.mjs` |
+| Linux | `~/.local/share/com.inpost.desktop/mcp/stdio.mjs` |
+| macOS | `~/Library/Application Support/com.inpost.desktop/mcp/stdio.mjs` |
+| Windows | `%APPDATA%\com.inpost.desktop\mcp\stdio.mjs` |
 
-Inpost Phase 1 should follow the same pattern: stable app-data path, config copyable into Cursor/Claude/etc., app must stay running while agents use stdio.
+Stable app-data path, config copyable into Cursor/Claude/etc.; app must stay running while agents use stdio.
 
 ```json
 {
@@ -273,4 +273,4 @@ Inpost Phase 1 should follow the same pattern: stable app-data path, config copy
 }
 ```
 
-(Exact binary/command may be a Rust MCP binary instead of Node — decide in Phase 1; prefer one runtime already shipped with the app.)
+(Exact binary/command may be a Rust MCP binary instead of Node — prefer one runtime already shipped with the app.)

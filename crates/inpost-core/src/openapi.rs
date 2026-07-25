@@ -5,15 +5,18 @@ use serde_json::{json, Map, Value};
 #[derive(Debug, Clone)]
 pub struct ImportedRequest {
     pub name: String,
+    pub description: String,
     pub method: String,
     pub url: String,
     pub headers_json: String,
     pub body: String,
+    pub body_type: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct ImportResult {
     pub collection_name: String,
+    pub collection_description: String,
     pub base_url: Option<String>,
     pub requests: Vec<ImportedRequest>,
 }
@@ -21,10 +24,13 @@ pub struct ImportResult {
 #[derive(Debug, Clone)]
 pub struct ExportRequest {
     pub name: String,
+    pub description: String,
     pub method: String,
     pub url: String,
     pub headers_json: String,
     pub body: String,
+    pub body_type: String,
+    pub body_pairs_json: String,
 }
 
 const METHODS: &[&str] = &["get", "post", "put", "patch", "delete", "head", "options"];
@@ -68,6 +74,13 @@ fn op_name(method: &str, path: &str, op: &Value) -> String {
     format!("{} {}", method.to_uppercase(), path)
 }
 
+fn op_description(op: &Value) -> String {
+    op.get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
 fn headers_from_op(op: &Value) -> String {
     let mut headers: Vec<(String, String)> = Vec::new();
     if let Some(params) = op.get("parameters").and_then(|p| p.as_array()) {
@@ -98,15 +111,34 @@ fn headers_from_op(op: &Value) -> String {
     serde_json::to_string(&headers).unwrap_or_else(|_| "[]".into())
 }
 
-fn body_from_op(op: &Value) -> String {
-    let json_body = op.pointer("/requestBody/content/application~1json");
-    let Some(media) = json_body else {
-        return String::new();
+fn body_from_op(op: &Value) -> (String, String) {
+    let content = op.pointer("/requestBody/content").and_then(|c| c.as_object());
+    let Some(content) = content else {
+        return (String::new(), "none".into());
     };
+    if content.contains_key("application/json") {
+        let media = &content["application/json"];
+        return (body_example(media), "json".into());
+    }
+    if content.contains_key("application/x-www-form-urlencoded") {
+        return (String::new(), "urlencoded".into());
+    }
+    if content.contains_key("multipart/form-data") {
+        return (String::new(), "multipart".into());
+    }
+    if content.contains_key("text/plain") {
+        let media = &content["text/plain"];
+        return (body_example(media), "text".into());
+    }
+    (String::new(), "none".into())
+}
+
+fn body_example(media: &Value) -> String {
     if let Some(ex) = media.get("example") {
         return serde_json::to_string_pretty(ex).unwrap_or_default();
     }
-    if let Some(ex) = media.pointer("/examples")
+    if let Some(ex) = media
+        .pointer("/examples")
         .and_then(|e| e.as_object())
         .and_then(|m| m.values().next())
         .and_then(|e| e.get("value"))
@@ -128,6 +160,11 @@ pub fn import_openapi(text: &str) -> Result<ImportResult, String> {
         .filter(|s| !s.is_empty())
         .unwrap_or("Imported API")
         .to_string();
+    let collection_description = spec
+        .pointer("/info/description")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let base_url = server_url(&spec);
     let paths = spec
         .get("paths")
@@ -146,12 +183,15 @@ pub fn import_openapi(text: &str) -> Result<ImportResult, String> {
             if !op.is_object() {
                 continue;
             }
+            let (body, body_type) = body_from_op(op);
             requests.push(ImportedRequest {
                 name: op_name(method, path, op),
+                description: op_description(op),
                 method: method.to_uppercase(),
                 url: path_to_url(path),
                 headers_json: headers_from_op(op),
-                body: body_from_op(op),
+                body,
+                body_type,
             });
         }
     }
@@ -160,13 +200,18 @@ pub fn import_openapi(text: &str) -> Result<ImportResult, String> {
     }
     Ok(ImportResult {
         collection_name,
+        collection_description,
         base_url,
         requests,
     })
 }
 
 /// Export requests as OpenAPI 3.0.3 JSON string.
-pub fn export_openapi(collection_name: &str, requests: &[ExportRequest]) -> Result<String, String> {
+pub fn export_openapi(
+    collection_name: &str,
+    collection_description: &str,
+    requests: &[ExportRequest],
+) -> Result<String, String> {
     let mut paths: Map<String, Value> = Map::new();
 
     for req in requests {
@@ -185,6 +230,9 @@ pub fn export_openapi(collection_name: &str, requests: &[ExportRequest]) -> Resu
         let mut op = Map::new();
         op.insert("operationId".into(), json!(slug(&req.name)));
         op.insert("summary".into(), json!(req.name));
+        if !req.description.trim().is_empty() {
+            op.insert("description".into(), json!(req.description));
+        }
 
         if let Ok(headers) = serde_json::from_str::<Vec<(String, String)>>(&req.headers_json) {
             let params: Vec<Value> = headers
@@ -203,18 +251,8 @@ pub fn export_openapi(collection_name: &str, requests: &[ExportRequest]) -> Resu
             }
         }
 
-        if !req.body.trim().is_empty() {
-            let example = serde_json::from_str::<Value>(&req.body).unwrap_or(json!(req.body));
-            op.insert(
-                "requestBody".into(),
-                json!({
-                    "content": {
-                        "application/json": {
-                            "example": example
-                        }
-                    }
-                }),
-            );
+        if let Some(request_body) = request_body_for(req) {
+            op.insert("requestBody".into(), request_body);
         }
 
         op.insert(
@@ -224,16 +262,79 @@ pub fn export_openapi(collection_name: &str, requests: &[ExportRequest]) -> Resu
         obj.insert(method, Value::Object(op));
     }
 
+    let mut info = Map::new();
+    info.insert("title".into(), json!(collection_name));
+    info.insert("version".into(), json!("1.0.0"));
+    if !collection_description.trim().is_empty() {
+        info.insert("description".into(), json!(collection_description));
+    }
     let doc = json!({
         "openapi": "3.0.3",
-        "info": {
-            "title": collection_name,
-            "version": "1.0.0"
-        },
+        "info": Value::Object(info),
         "servers": [{ "url": "{{baseUrl}}" }],
         "paths": paths
     });
     serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())
+}
+
+/// Build a `requestBody` object matching the request's body type, or `None`.
+fn request_body_for(req: &ExportRequest) -> Option<Value> {
+    // Empty/none type falls back to json when a raw body exists (legacy rows).
+    let body_type = if req.body_type.is_empty() {
+        if req.body.trim().is_empty() {
+            "none"
+        } else {
+            "json"
+        }
+    } else {
+        req.body_type.as_str()
+    };
+
+    match body_type {
+        "none" => None,
+        "text" => {
+            if req.body.trim().is_empty() {
+                return None;
+            }
+            Some(json!({
+                "content": { "text/plain": { "example": req.body } }
+            }))
+        }
+        "urlencoded" | "multipart" => {
+            let pairs = crate::httputil::parse_kv_pairs(&req.body_pairs_json);
+            if pairs.iter().all(|(k, _)| k.is_empty()) {
+                return None;
+            }
+            let mut props = Map::new();
+            let mut example = Map::new();
+            for (k, v) in pairs.into_iter().filter(|(k, _)| !k.is_empty()) {
+                props.insert(k.clone(), json!({ "type": "string" }));
+                example.insert(k, json!(v));
+            }
+            let media = if body_type == "urlencoded" {
+                "application/x-www-form-urlencoded"
+            } else {
+                "multipart/form-data"
+            };
+            Some(json!({
+                "content": {
+                    media: {
+                        "schema": { "type": "object", "properties": props },
+                        "example": example
+                    }
+                }
+            }))
+        }
+        _ => {
+            if req.body.trim().is_empty() {
+                return None;
+            }
+            let example = serde_json::from_str::<Value>(&req.body).unwrap_or(json!(req.body));
+            Some(json!({
+                "content": { "application/json": { "example": example } }
+            }))
+        }
+    }
 }
 
 fn split_url_path(url: &str) -> (String, String) {
@@ -280,11 +381,11 @@ mod tests {
 
     const SPEC: &str = r#"{
       "openapi": "3.0.3",
-      "info": { "title": "Pet Store" },
+      "info": { "title": "Pet Store", "description": "The pet store API." },
       "servers": [{ "url": "https://api.example.com" }],
       "paths": {
         "/pets": {
-          "get": { "operationId": "listPets", "summary": "List pets" },
+          "get": { "operationId": "listPets", "summary": "List pets", "description": "Returns all pets." },
           "post": {
             "operationId": "createPet",
             "requestBody": {
@@ -306,33 +407,78 @@ mod tests {
     fn import_round_trip_shape() {
         let imported = import_openapi(SPEC).expect("import");
         assert_eq!(imported.collection_name, "Pet Store");
+        assert_eq!(imported.collection_description, "The pet store API.");
         assert_eq!(
             imported.base_url.as_deref(),
             Some("https://api.example.com")
         );
         assert_eq!(imported.requests.len(), 3);
+        assert!(imported
+            .requests
+            .iter()
+            .any(|r| r.name == "listPets" && r.description == "Returns all pets."));
         assert!(imported.requests.iter().any(|r| r.method == "GET" && r.url.contains("/pets")));
         assert!(imported
             .requests
             .iter()
-            .any(|r| r.method == "POST" && r.body.contains("fido")));
+            .any(|r| r.method == "POST" && r.body.contains("fido") && r.body_type == "json"));
+        assert!(imported
+            .requests
+            .iter()
+            .any(|r| r.method == "GET" && r.body_type == "none"));
 
         let export_reqs: Vec<ExportRequest> = imported
             .requests
             .iter()
             .map(|r| ExportRequest {
                 name: r.name.clone(),
+                description: r.description.clone(),
                 method: r.method.clone(),
                 url: r.url.clone(),
                 headers_json: r.headers_json.clone(),
                 body: r.body.clone(),
+                body_type: r.body_type.clone(),
+                body_pairs_json: "[]".into(),
             })
             .collect();
-        let out = export_openapi("Pet Store", &export_reqs).expect("export");
+        let out = export_openapi("Pet Store", "The pet store API.", &export_reqs).expect("export");
         let v: Value = serde_json::from_str(&out).expect("json");
         assert_eq!(v["openapi"], "3.0.3");
+        assert_eq!(v["info"]["description"], "The pet store API.");
         assert!(v["paths"]["/pets"]["get"].is_object());
         assert!(v["paths"]["/pets"]["post"].is_object());
+        // Operation description round-trips.
+        assert_eq!(
+            v["paths"]["/pets"]["get"]["description"],
+            "Returns all pets."
+        );
+        // JSON body round-trips as application/json requestBody.
+        assert!(
+            v["paths"]["/pets"]["post"]["requestBody"]["content"]["application/json"]
+                .is_object()
+        );
+    }
+
+    #[test]
+    fn export_form_body_content_type() {
+        let reqs = vec![ExportRequest {
+            name: "Create".into(),
+            description: String::new(),
+            method: "POST".into(),
+            url: "{{baseUrl}}/form".into(),
+            headers_json: "[]".into(),
+            body: String::new(),
+            body_type: "urlencoded".into(),
+            body_pairs_json: r#"[["name","Ada"],["role","dev"]]"#.into(),
+        }];
+        let out = export_openapi("Forms", "", &reqs).expect("export");
+        let v: Value = serde_json::from_str(&out).expect("json");
+        let ct = &v["paths"]["/form"]["post"]["requestBody"]["content"];
+        assert!(ct["application/x-www-form-urlencoded"]["schema"]["properties"]["name"].is_object());
+        assert_eq!(
+            ct["application/x-www-form-urlencoded"]["example"]["role"],
+            "dev"
+        );
     }
 
     #[test]

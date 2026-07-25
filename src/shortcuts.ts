@@ -6,6 +6,7 @@ export type ShortcutAction =
   | "focusUrl"
   | "newRequest"
   | "search"
+  | "searchTabs"
   | "toggleResponse"
   | "dockBottom"
   | "dockRight"
@@ -26,6 +27,11 @@ export const SHORTCUTS: Shortcut[] = [
   { action: "focusUrl", keys: ["Ctrl", "L"], label: "Focus URL" },
   { action: "newRequest", keys: ["Ctrl", "N"], label: "New request" },
   { action: "search", keys: ["Ctrl", "K"], label: "Search" },
+  {
+    action: "searchTabs",
+    keys: ["Ctrl", "Shift", "A"],
+    label: "Search open tabs",
+  },
   { action: "toggleResponse", keys: ["Ctrl", "J"], label: "Show / hide response" },
   {
     action: "dockBottom",
@@ -110,6 +116,7 @@ export function matchShortcut(e: KeyEventLike): ShortcutAction | null {
     return shift ? "cycleTabPrev" : "cycleTab";
   }
   if (mod) {
+    if (shift && key === "a") return "searchTabs";
     if (key === "enter") return "send";
     if (key === "s") return "save";
     if (key === "l") return "focusUrl";
@@ -196,6 +203,10 @@ if (typeof process !== "undefined" && process.argv[1]?.includes("shortcuts")) {
     "ctrl+shift+pageup still previous",
   );
   console.assert(matchShortcut(key("Tab")) === null, "plain tab tabs");
+  console.assert(
+    matchShortcut(key("a", { ctrlKey: true, shiftKey: true })) === "searchTabs",
+    "ctrl+shift+a searches tabs",
+  );
 
   console.assert(isInspectKey(key("F12")), "f12 inspects");
   console.assert(

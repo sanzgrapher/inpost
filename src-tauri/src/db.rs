@@ -24,6 +24,8 @@ pub struct Collection {
     pub name: String,
     #[serde(default)]
     pub workspace_id: String,
+    #[serde(default)]
+    pub description: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,12 +48,37 @@ pub struct HttpRequest {
     #[serde(default)]
     pub folder_id: Option<String>,
     pub name: String,
+    #[serde(default)]
+    pub description: String,
     pub method: String,
     pub url: String,
     pub headers_json: String,
     pub body: String,
+    #[serde(default = "default_body_type")]
+    pub body_type: String,
+    #[serde(default = "default_empty_array")]
+    pub body_pairs_json: String,
+    #[serde(default = "default_auth_type")]
+    pub auth_type: String,
+    #[serde(default = "default_empty_object")]
+    pub auth_json: String,
+    #[serde(default = "default_empty_array")]
+    pub path_vars_json: String,
     #[serde(default)]
     pub sort_order: i64,
+}
+
+fn default_body_type() -> String {
+    "none".into()
+}
+fn default_auth_type() -> String {
+    "none".into()
+}
+fn default_empty_array() -> String {
+    "[]".into()
+}
+fn default_empty_object() -> String {
+    "{}".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +114,8 @@ pub struct HistoryEntry {
     pub body: Option<String>,
     #[serde(default)]
     pub body_pretty: Option<String>,
+    #[serde(default)]
+    pub headers_json: Option<String>,
     pub created_at: i64,
 }
 
@@ -331,6 +360,39 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         )
         .map_err(|e| e.to_string())?;
     }
+
+    if !has_column(conn, "requests", "body_type")? {
+        conn.execute_batch(
+            "
+            ALTER TABLE requests ADD COLUMN body_type TEXT NOT NULL DEFAULT 'none';
+            ALTER TABLE requests ADD COLUMN body_pairs_json TEXT NOT NULL DEFAULT '[]';
+            ALTER TABLE requests ADD COLUMN auth_type TEXT NOT NULL DEFAULT 'none';
+            ALTER TABLE requests ADD COLUMN auth_json TEXT NOT NULL DEFAULT '{}';
+            ALTER TABLE requests ADD COLUMN path_vars_json TEXT NOT NULL DEFAULT '[]';
+            UPDATE requests SET body_type = 'json' WHERE TRIM(body) != '';
+            ",
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    if !has_column(conn, "request_history", "headers_json")? {
+        conn.execute_batch(
+            "ALTER TABLE request_history ADD COLUMN headers_json TEXT;",
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    if !has_column(conn, "requests", "description")? {
+        conn.execute_batch(
+            "ALTER TABLE requests ADD COLUMN description TEXT NOT NULL DEFAULT '';",
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    if !has_column(conn, "collections", "description")? {
+        conn.execute_batch(
+            "ALTER TABLE collections ADD COLUMN description TEXT NOT NULL DEFAULT '';",
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
     Ok(())
 }
 
@@ -511,9 +573,9 @@ impl Db {
     pub fn list_collections(&self, workspace_id: Option<String>) -> Result<Vec<Collection>, String> {
         let conn = self.0.lock().map_err(|e| e.to_string())?;
         let sql = if workspace_id.is_some() {
-            "SELECT id, name, workspace_id FROM collections WHERE workspace_id = ?1 ORDER BY name"
+            "SELECT id, name, workspace_id, description FROM collections WHERE workspace_id = ?1 ORDER BY name"
         } else {
-            "SELECT id, name, workspace_id FROM collections ORDER BY name"
+            "SELECT id, name, workspace_id, description FROM collections ORDER BY name"
         };
         let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
         let map_row = |r: &rusqlite::Row<'_>| {
@@ -521,6 +583,7 @@ impl Db {
                 id: r.get(0)?,
                 name: r.get(1)?,
                 workspace_id: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                description: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
             })
         };
         let rows = if let Some(wid) = workspace_id {
@@ -563,6 +626,7 @@ impl Db {
             id,
             name,
             workspace_id,
+            description: String::new(),
         })
     }
 
@@ -577,17 +641,58 @@ impl Db {
         if n == 0 {
             return Err("collection not found".into());
         }
-        let workspace_id: String = conn
+        let (workspace_id, description): (String, String) = conn
             .query_row(
-                "SELECT workspace_id FROM collections WHERE id = ?1",
+                "SELECT workspace_id, description FROM collections WHERE id = ?1",
                 params![id],
-                |r| r.get(0),
+                |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                        r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    ))
+                },
             )
             .map_err(|e| e.to_string())?;
         Ok(Collection {
             id: id.to_string(),
             name,
             workspace_id,
+            description,
+        })
+    }
+
+    pub fn set_collection_description(
+        &self,
+        id: &str,
+        description: String,
+    ) -> Result<Collection, String> {
+        let conn = self.0.lock().map_err(|e| e.to_string())?;
+        let n = conn
+            .execute(
+                "UPDATE collections SET description = ?1 WHERE id = ?2",
+                params![description, id],
+            )
+            .map_err(|e| e.to_string())?;
+        if n == 0 {
+            return Err("collection not found".into());
+        }
+        let (name, workspace_id): (String, String) = conn
+            .query_row(
+                "SELECT name, workspace_id FROM collections WHERE id = ?1",
+                params![id],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    ))
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(Collection {
+            id: id.to_string(),
+            name,
+            workspace_id,
+            description,
         })
     }
 
@@ -730,28 +835,37 @@ impl Db {
         let conn = self.0.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, collection_id, folder_id, name, method, url, headers_json, body, sort_order
+                "SELECT id, collection_id, folder_id, name, method, url, headers_json, body, sort_order,
+                        body_type, body_pairs_json, auth_type, auth_json, path_vars_json, description
                  FROM requests WHERE collection_id = ?1
                  ORDER BY sort_order, name",
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
-            .query_map(params![collection_id], |r| {
-                Ok(HttpRequest {
-                    id: r.get(0)?,
-                    collection_id: r.get(1)?,
-                    folder_id: r.get(2)?,
-                    name: r.get(3)?,
-                    method: r.get(4)?,
-                    url: r.get(5)?,
-                    headers_json: r.get(6)?,
-                    body: r.get(7)?,
-                    sort_order: r.get(8)?,
-                })
-            })
+            .query_map(params![collection_id], |r| Self::map_request(r))
             .map_err(|e| e.to_string())?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())
+    }
+
+    fn map_request(r: &rusqlite::Row<'_>) -> rusqlite::Result<HttpRequest> {
+        Ok(HttpRequest {
+            id: r.get(0)?,
+            collection_id: r.get(1)?,
+            folder_id: r.get(2)?,
+            name: r.get(3)?,
+            method: r.get(4)?,
+            url: r.get(5)?,
+            headers_json: r.get(6)?,
+            body: r.get(7)?,
+            sort_order: r.get(8)?,
+            body_type: r.get(9)?,
+            body_pairs_json: r.get(10)?,
+            auth_type: r.get(11)?,
+            auth_json: r.get(12)?,
+            path_vars_json: r.get(13)?,
+            description: r.get::<_, Option<String>>(14)?.unwrap_or_default(),
+        })
     }
 
     pub fn upsert_request(&self, mut req: HttpRequest) -> Result<HttpRequest, String> {
@@ -796,15 +910,22 @@ impl Db {
         req.name = inpost_core::tree::unique_sibling_name(&req.name, &taken);
 
         conn.execute(
-            "INSERT INTO requests (id, collection_id, folder_id, name, method, url, headers_json, body, sort_order)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "INSERT INTO requests (id, collection_id, folder_id, name, method, url, headers_json, body, sort_order,
+                                  body_type, body_pairs_json, auth_type, auth_json, path_vars_json, description)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
              ON CONFLICT(id) DO UPDATE SET
                collection_id=excluded.collection_id,
                name=excluded.name,
                method=excluded.method,
                url=excluded.url,
                headers_json=excluded.headers_json,
-               body=excluded.body",
+               body=excluded.body,
+               body_type=excluded.body_type,
+               body_pairs_json=excluded.body_pairs_json,
+               auth_type=excluded.auth_type,
+               auth_json=excluded.auth_json,
+               path_vars_json=excluded.path_vars_json,
+               description=excluded.description",
             params![
                 req.id,
                 req.collection_id,
@@ -814,7 +935,13 @@ impl Db {
                 req.url,
                 req.headers_json,
                 req.body,
-                req.sort_order
+                req.sort_order,
+                req.body_type,
+                req.body_pairs_json,
+                req.auth_type,
+                req.auth_json,
+                req.path_vars_json,
+                req.description,
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -834,22 +961,11 @@ impl Db {
     pub fn get_request(&self, id: &str) -> Result<HttpRequest, String> {
         let conn = self.0.lock().map_err(|e| e.to_string())?;
         conn.query_row(
-            "SELECT id, collection_id, folder_id, name, method, url, headers_json, body, sort_order
+            "SELECT id, collection_id, folder_id, name, method, url, headers_json, body, sort_order,
+                    body_type, body_pairs_json, auth_type, auth_json, path_vars_json, description
              FROM requests WHERE id = ?1",
             params![id],
-            |r| {
-                Ok(HttpRequest {
-                    id: r.get(0)?,
-                    collection_id: r.get(1)?,
-                    folder_id: r.get(2)?,
-                    name: r.get(3)?,
-                    method: r.get(4)?,
-                    url: r.get(5)?,
-                    headers_json: r.get(6)?,
-                    body: r.get(7)?,
-                    sort_order: r.get(8)?,
-                })
-            },
+            Self::map_request,
         )
         .map_err(|e| e.to_string())
     }
@@ -1051,8 +1167,8 @@ impl Db {
         conn.execute(
             "INSERT INTO request_history
              (id, workspace_id, request_id, method, url, status, status_text,
-              elapsed_ms, size_bytes, error, body, body_pretty, created_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+              elapsed_ms, size_bytes, error, body, body_pretty, created_at, headers_json)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
             params![
                 entry.id,
                 entry.workspace_id,
@@ -1066,7 +1182,8 @@ impl Db {
                 entry.error,
                 entry.body,
                 entry.body_pretty,
-                entry.created_at
+                entry.created_at,
+                entry.headers_json,
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -1088,6 +1205,7 @@ impl Db {
             body: r.get(10)?,
             body_pretty: r.get(11)?,
             created_at: r.get(12)?,
+            headers_json: r.get(13)?,
         })
     }
 
@@ -1101,7 +1219,7 @@ impl Db {
         let mut stmt = conn
             .prepare(
                 "SELECT id, workspace_id, request_id, method, url, status, status_text,
-                        elapsed_ms, size_bytes, error, body, body_pretty, created_at
+                        elapsed_ms, size_bytes, error, body, body_pretty, created_at, headers_json
                  FROM request_history
                  WHERE workspace_id = ?1
                  ORDER BY created_at DESC
@@ -1125,7 +1243,7 @@ impl Db {
         let mut stmt = conn
             .prepare(
                 "SELECT id, workspace_id, request_id, method, url, status, status_text,
-                        elapsed_ms, size_bytes, error, body, body_pretty, created_at
+                        elapsed_ms, size_bytes, error, body, body_pretty, created_at, headers_json
                  FROM request_history
                  WHERE request_id = ?1
                  ORDER BY created_at DESC

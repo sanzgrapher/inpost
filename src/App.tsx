@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
+  BookOpen,
   Braces,
   Box,
   ChevronDown,
@@ -25,22 +26,39 @@ import {
   Settings,
   SlidersHorizontal,
   Square,
+  Trash2,
+  Upload,
   X,
 } from "lucide-react";
 import { CodeEditor } from "./CodeEditor";
+import { DocArticle } from "./Docs";
 import { GlobalSearch } from "./GlobalSearch";
 import { methodClass, methodLabel } from "./methodStyle";
 import {
   type IndexItem,
 } from "./searchQuery";
 import { UrlField } from "./UrlField";
+import { VarField, type EnvVarHoverProps } from "./EnvVarHover";
 import { SHORTCUTS, isInspectKey, matchShortcut, nextInCycle } from "./shortcuts";
-import { Button, Modal, Select, useDialogs } from "./ui";
+import { Button, Modal, Select, SuggestInput, useDialogs } from "./ui";
 import {
   sourceKeys,
   syncSelectedVars,
   uniqueEnvName,
 } from "./envSync";
+import { encodeQueryPart, pairsToMap, resolveRequestUrl } from "./envVar";
+import { diffTokens } from "./envSync";
+import {
+  AUTH_TYPE_OPTIONS,
+  BODY_TYPE_OPTIONS,
+  COMMON_HEADERS,
+  parseAuthJson,
+  parseHistoryHeaders,
+  pathVarNames,
+  syncContentType,
+  type AuthType,
+  type BodyType,
+} from "./reqMeta";
 import {
   clampSidebar,
   clampSplit,
@@ -62,7 +80,12 @@ const Imd = { size: 15, strokeWidth: 1.75 } as const;
 const Ifill = { size: 14, strokeWidth: 1.5, fill: "currentColor" } as const;
 
 type Workspace = { id: string; name: string };
-type Collection = { id: string; name: string; workspaceId?: string };
+type Collection = {
+  id: string;
+  name: string;
+  workspaceId?: string;
+  description?: string;
+};
 type Folder = {
   id: string;
   collectionId: string;
@@ -75,18 +98,30 @@ type HttpRequest = {
   collectionId: string;
   folderId?: string | null;
   name: string;
+  description?: string;
   method: string;
   url: string;
   headersJson: string;
   body: string;
+  bodyType?: string;
+  bodyPairsJson?: string;
+  authType?: string;
+  authJson?: string;
+  pathVarsJson?: string;
   sortOrder?: number;
 };
 type SavedSnap = {
   name: string;
+  description: string;
   method: string;
   url: string;
   headersJson: string;
   body: string;
+  bodyType: string;
+  bodyPairsJson: string;
+  authType: string;
+  authJson: string;
+  pathVarsJson: string;
 };
 type TreeKind = "folder" | "request";
 type TreeSibling = { kind: TreeKind; id: string; name: string; sortOrder: number };
@@ -106,7 +141,14 @@ type SendResult = {
   elapsedMs: number;
   resolvedUrl: string;
 };
-type Pair = { key: string; value: string; enabled?: boolean };
+type Pair = {
+  key: string;
+  value: string;
+  enabled?: boolean;
+  /** Multipart part kind — ignored for headers/query/path. */
+  type?: "text" | "file";
+  description?: string;
+};
 type HistoryEntry = {
   id: string;
   workspaceId: string;
@@ -120,10 +162,11 @@ type HistoryEntry = {
   error?: string | null;
   body?: string | null;
   bodyPretty?: string | null;
+  headersJson?: string | null;
   createdAt: number;
 };
-type ReqTab = "params" | "headers" | "body";
-type ResTab = "body" | "headers";
+type ReqTab = "overview" | "params" | "headers" | "body" | "auth";
+type ResTab = "body" | "headers" | "history";
 type SettingsAppSection = "general" | "shortcuts" | "mcp";
 type SettingsSection = SettingsAppSection | `ws:${string}`;
 
@@ -154,6 +197,12 @@ const WS_KEY = "inpost.workspaceId";
 const DEV_MODE_KEY = "inpost.devMode";
 /** Sentinel open-tab id — sits beside request tabs. */
 const SETTINGS_ID = "__settings__";
+/** Collection-docs tabs share the strip: `__coldoc__:<collectionId>`. */
+const COLDOC_PREFIX = "__coldoc__:";
+const coldocTabId = (collectionId: string) => `${COLDOC_PREFIX}${collectionId}`;
+function parseColdocTab(id: string | null): string | null {
+  return id?.startsWith(COLDOC_PREFIX) ? id.slice(COLDOC_PREFIX.length) : null;
+}
 
 function mcpCursorConfig(stdioPath: string): string {
   return JSON.stringify(
@@ -307,19 +356,41 @@ function computeTreeVisibility(
 
 function parsePairs(json: string): Pair[] {
   try {
-    const arr = JSON.parse(json || "[]") as [string, string][];
+    const arr = JSON.parse(json || "[]") as unknown;
     if (!Array.isArray(arr)) return [{ key: "", value: "", enabled: true }];
-    const pairs = arr.map(([key, value]) => ({
-      key,
-      value,
-      enabled: true,
-    }));
+    const pairs = arr.map((item): Pair => {
+      if (Array.isArray(item)) {
+        const [key, value, kind] = item as [string, string, string?];
+        return {
+          key: key ?? "",
+          value: value ?? "",
+          enabled: true,
+          type: kind === "file" ? "file" : "text",
+        };
+      }
+      if (item && typeof item === "object") {
+        const o = item as {
+          key?: string;
+          value?: string;
+          enabled?: boolean;
+          type?: string;
+        };
+        return {
+          key: o.key ?? "",
+          value: o.value ?? "",
+          enabled: o.enabled !== false,
+          type: o.type === "file" ? "file" : "text",
+        };
+      }
+      return { key: "", value: "", enabled: true, type: "text" };
+    });
     return pairs.length ? pairs : [{ key: "", value: "", enabled: true }];
   } catch {
     return [{ key: "", value: "", enabled: true }];
   }
 }
 
+/** Headers / query / path — always `[[k,v],…]` for the Rust wire. */
 function pairsToJson(pairs: Pair[]): string {
   return JSON.stringify(
     pairs
@@ -328,33 +399,100 @@ function pairsToJson(pairs: Pair[]): string {
   );
 }
 
-function snapOf(r: HttpRequest): SavedSnap {
+/** Body form pairs — keep `type` so multipart Text/File survives reload. */
+function bodyPairsToJson(pairs: Pair[]): string {
+  return JSON.stringify(
+    pairs
+      .filter((p) => p.enabled !== false && p.key.trim())
+      .map((p) => ({
+        key: p.key,
+        value: p.value,
+        type: p.type === "file" ? "file" : "text",
+      })),
+  );
+}
+
+/** Flatten for send_http_request (`Vec<(String,String)>`). */
+function bodyPairsForSend(pairs: Pair[]): [string, string][] {
+  return pairs
+    .filter((p) => p.enabled !== false && p.key.trim())
+    .map((p) => [p.key, p.value]);
+}
+
+function asBodyType(s: string | undefined | null): BodyType {
+  if (
+    s === "none" ||
+    s === "json" ||
+    s === "text" ||
+    s === "urlencoded" ||
+    s === "multipart"
+  ) {
+    return s;
+  }
+  return "none";
+}
+
+function asAuthType(s: string | undefined | null): AuthType {
+  if (s === "bearer" || s === "basic" || s === "apikey" || s === "none") {
+    return s;
+  }
+  return "none";
+}
+
+function normalizeRequest(r: HttpRequest): HttpRequest {
   return {
-    name: r.name,
-    method: r.method,
-    url: r.url,
-    headersJson: r.headersJson,
-    body: r.body,
+    ...r,
+    description: r.description ?? "",
+    bodyType: r.bodyType ?? (r.body?.trim() ? "json" : "none"),
+    bodyPairsJson: r.bodyPairsJson ?? "[]",
+    authType: r.authType ?? "none",
+    authJson: r.authJson ?? "{}",
+    pathVarsJson: r.pathVarsJson ?? "[]",
+  };
+}
+
+function mergePathPairs(url: string, stored: Pair[]): Pair[] {
+  const names = pathVarNames(url);
+  return names.map((name) => {
+    const found = stored.find((p) => p.key === name);
+    return { key: name, value: found?.value ?? "", enabled: true };
+  });
+}
+
+function snapOf(r: HttpRequest): SavedSnap {
+  const n = normalizeRequest(r);
+  return {
+    name: n.name,
+    description: n.description ?? "",
+    method: n.method,
+    url: n.url,
+    headersJson: n.headersJson,
+    body: n.body,
+    bodyType: n.bodyType!,
+    bodyPairsJson: n.bodyPairsJson!,
+    authType: n.authType!,
+    authJson: n.authJson!,
+    pathVarsJson: n.pathVarsJson!,
   };
 }
 
 function snapDirty(
   saved: SavedSnap | undefined,
-  cur: {
-    name: string;
-    method: string;
-    url: string;
-    headersJson: string;
-    body: string;
-  },
+  cur: SavedSnap,
 ): boolean {
   if (!saved) return false;
   return (
     cur.name !== saved.name ||
+    cur.description !== saved.description ||
     cur.method !== saved.method ||
     cur.url !== saved.url ||
     cur.headersJson !== saved.headersJson ||
-    cur.body !== saved.body
+    cur.body !== saved.body ||
+    cur.bodyType !== saved.bodyType ||
+    cur.bodyPairsJson !== saved.bodyPairsJson ||
+    cur.authType !== saved.authType ||
+    cur.authJson !== saved.authJson ||
+    cur.pathVarsJson !== saved.pathVarsJson
   );
 }
 
@@ -389,10 +527,7 @@ function splitUrl(url: string): { base: string; query: Pair[] } {
 function joinUrl(base: string, query: Pair[]): string {
   const qs = query
     .filter((p) => p.enabled !== false && p.key.trim())
-    .map(
-      (p) =>
-        `${encodeURIComponent(p.key)}=${encodeURIComponent(p.value)}`,
-    )
+    .map((p) => `${encodeQueryPart(p.key)}=${encodeQueryPart(p.value)}`)
     .join("&");
   return qs ? `${base}?${qs}` : base;
 }
@@ -517,23 +652,54 @@ function PairTable({
   onChange,
   keyLabel = "Key",
   filter = "",
+  keySuggestions,
+  lockKeys = false,
+  tools = false,
+  envHover,
 }: {
   pairs: Pair[];
   onChange: (next: Pair[]) => void;
   keyLabel?: string;
   /** Display filter only — edits still target full list indices. */
   filter?: string;
+  keySuggestions?: string[];
+  /** Path params: keys are derived from the URL, not editable. */
+  lockKeys?: boolean;
+  /** Params table actions: description column + bulk key:value editor. */
+  tools?: boolean;
+  /** Hover-edit `{{vars}}` in the Value column. */
+  envHover?: EnvVarHoverProps;
 }) {
+  const [showDescription, setShowDescription] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [bulkDraft, setBulkDraft] = useState("");
+  const toolsRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    function onDoc(e: MouseEvent) {
+      if (toolsRef.current && !toolsRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [menuOpen]);
+
   function update(i: number, patch: Partial<Pair>) {
     const next = pairs.map((p, idx) => (idx === i ? { ...p, ...patch } : p));
-    const last = next[next.length - 1];
-    if (last && (last.key || last.value)) {
-      next.push({ key: "", value: "", enabled: true });
+    if (!lockKeys) {
+      const last = next[next.length - 1];
+      if (last && (last.key || last.value)) {
+        next.push({ key: "", value: "", enabled: true });
+      }
     }
     onChange(next);
   }
 
   function remove(i: number) {
+    if (lockKeys) return;
     const next = pairs.filter((_, idx) => idx !== i);
     onChange(
       next.length ? next : [{ key: "", value: "", enabled: true }],
@@ -541,15 +707,102 @@ function PairTable({
   }
 
   const q = filter.trim().toLowerCase();
+  const rowClass = `kv-row${showDescription ? " has-description" : ""}`;
+
+  function openBulk() {
+    setBulkDraft(
+      pairs
+        .filter((p) => p.key || p.value)
+        .map((p) => `${p.key}:${p.value}`)
+        .join("\n"),
+    );
+    setBulkOpen(true);
+  }
+
+  function applyBulk() {
+    const next = bulkDraft
+      .split(/\r?\n/)
+      .filter((line) => line.trim())
+      .map((line): Pair => {
+        const colon = line.indexOf(":");
+        return {
+          key: (colon < 0 ? line : line.slice(0, colon)).trim(),
+          value: colon < 0 ? "" : line.slice(colon + 1).trim(),
+          enabled: true,
+        };
+      });
+    onChange([...next, { key: "", value: "", enabled: true }]);
+    setBulkOpen(false);
+  }
 
   return (
-    <div className="kv-table">
-      <div className="kv-head">
+    <div className={`kv-table${tools ? " has-tools" : ""}`}>
+      {tools && (
+        <div className="kv-toolbar" ref={toolsRef}>
+          <button
+            type="button"
+            className="kv-more"
+            aria-label="Table options"
+            aria-expanded={menuOpen}
+            onClick={() => setMenuOpen((v) => !v)}
+          >
+            <MoreHorizontal {...Ism} />
+          </button>
+          {menuOpen && (
+            <div className="kv-tools-menu">
+              <label>
+                <input
+                  type="checkbox"
+                  checked={showDescription}
+                  onChange={(e) => setShowDescription(e.target.checked)}
+                />
+                Description
+              </label>
+            </div>
+          )}
+          {!lockKeys && (
+            <button type="button" className="kv-bulk-btn" onClick={openBulk}>
+              Bulk edit
+            </button>
+          )}
+        </div>
+      )}
+      <div className={`kv-head${showDescription ? " has-description" : ""}`}>
         <span />
         <span>{keyLabel}</span>
         <span>Value</span>
+        {showDescription && <span>Description</span>}
         <span />
       </div>
+      {bulkOpen && (
+        <div className="kv-bulk">
+          <div className="kv-bulk-head">
+            <span>Bulk edit as key:value pairs</span>
+            <button
+              type="button"
+              className="icon-btn"
+              aria-label="Close bulk edit"
+              onClick={() => setBulkOpen(false)}
+            >
+              <X {...Ism} />
+            </button>
+          </div>
+          <textarea
+            value={bulkDraft}
+            autoFocus
+            placeholder={"page:1\nlimit:20"}
+            onChange={(e) => setBulkDraft(e.target.value)}
+          />
+          <div className="kv-bulk-actions">
+            <Button size="sm" onClick={() => setBulkOpen(false)}>
+              Cancel
+            </Button>
+            <Button size="sm" variant="primary" onClick={applyBulk}>
+              Apply
+            </Button>
+          </div>
+        </div>
+      )}
       {pairs.map((p, i) => {
         const isLast = i === pairs.length - 1 && !p.key && !p.value;
         if (
@@ -561,40 +814,233 @@ function PairTable({
           return null;
         }
         return (
-        <div className="kv-row" key={i}>
+        <div className={rowClass} key={lockKeys ? p.key : i}>
           <input
             type="checkbox"
             checked={p.enabled !== false}
             onChange={(e) => update(i, { enabled: e.target.checked })}
             aria-label="Enable row"
+            disabled={lockKeys}
           />
-          <input
-            placeholder={keyLabel}
-            value={p.key}
-            onChange={(e) => update(i, { key: e.target.value })}
-          />
-          <input
-            placeholder="Value"
-            value={p.value}
-            onChange={(e) => update(i, { value: e.target.value })}
-          />
-          <button
-            type="button"
-            className="icon-btn"
-            onClick={() => remove(i)}
-            aria-label="Remove"
-          >
-            <X {...Ism} />
-          </button>
+          {keySuggestions?.length && !lockKeys ? (
+            <SuggestInput
+              placeholder={keyLabel}
+              value={p.key}
+              suggestions={keySuggestions}
+              onChange={(key) => update(i, { key })}
+            />
+          ) : (
+            <input
+              placeholder={keyLabel}
+              value={p.key}
+              readOnly={lockKeys}
+              onChange={(e) => update(i, { key: e.target.value })}
+            />
+          )}
+          {envHover ? (
+            <VarField
+              value={p.value}
+              placeholder="Value"
+              env={envHover.env}
+              envPairs={envHover.envPairs}
+              globalPairs={envHover.globalPairs}
+              onSaveVar={envHover.onSaveVar}
+              onOpenEnv={envHover.onOpenEnv}
+              onChange={(value) => update(i, { value })}
+            />
+          ) : (
+            <input
+              placeholder="Value"
+              value={p.value}
+              onChange={(e) => update(i, { value: e.target.value })}
+            />
+          )}
+          {showDescription && (
+            <input
+              placeholder="Description"
+              value={p.description ?? ""}
+              onChange={(e) => update(i, { description: e.target.value })}
+            />
+          )}
+          {!lockKeys ? (
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={() => remove(i)}
+              aria-label="Remove"
+            >
+              <X {...Ism} />
+            </button>
+          ) : (
+            <span />
+          )}
         </div>
+        );
+      })}
+      {lockKeys ? (
+        pairs.length === 0 && (
+          <div className="kv-empty muted">No path variables in URL</div>
+        )
+      ) : (
+        <button
+          type="button"
+          className="link-btn"
+          onClick={() =>
+            onChange([...pairs, { key: "", value: "", enabled: true }])
+          }
+        >
+          <Plus {...Ism} /> Add more
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** Boxy multipart/form-data editor — Text | File parts in card rows. */
+function MultipartTable({
+  pairs,
+  onChange,
+  envHover,
+}: {
+  pairs: Pair[];
+  onChange: (next: Pair[]) => void;
+  envHover?: EnvVarHoverProps;
+}) {
+  const fileRefs = useRef<Record<number, HTMLInputElement | null>>({});
+
+  function ensureTrailing(next: Pair[]) {
+    const last = next[next.length - 1];
+    if (last && (last.key || last.value || last.type === "file")) {
+      next.push({ key: "", value: "", enabled: true, type: "text" });
+    }
+    return next;
+  }
+
+  function update(i: number, patch: Partial<Pair>) {
+    onChange(
+      ensureTrailing(pairs.map((p, idx) => (idx === i ? { ...p, ...patch } : p))),
+    );
+  }
+
+  function remove(i: number) {
+    const next = pairs.filter((_, idx) => idx !== i);
+    onChange(
+      next.length
+        ? next
+        : [{ key: "", value: "", enabled: true, type: "text" }],
+    );
+  }
+
+  return (
+    <div className="mp-table">
+      {pairs.map((p, i) => {
+        const isFile = p.type === "file";
+        return (
+          <div className="mp-row" key={i}>
+            <input
+              type="checkbox"
+              checked={p.enabled !== false}
+              onChange={(e) => update(i, { enabled: e.target.checked })}
+              aria-label="Enable part"
+            />
+            <input
+              className="mp-key"
+              placeholder="Key"
+              value={p.key}
+              onChange={(e) => update(i, { key: e.target.value })}
+            />
+            <Select
+              className="mp-kind"
+              value={isFile ? "file" : "text"}
+              options={[
+                { id: "text", label: "Text" },
+                { id: "file", label: "File" },
+              ]}
+              onChange={(id) =>
+                update(i, {
+                  type: id === "file" ? "file" : "text",
+                  // Clear value when switching kinds so Text ↔ File don’t share junk.
+                  value: "",
+                })
+              }
+            />
+            {isFile ? (
+              <div className="mp-file">
+                <button
+                  type="button"
+                  className="mp-file-btn"
+                  onClick={() => fileRefs.current[i]?.click()}
+                >
+                  {p.value ? p.value : "Choose file…"}
+                </button>
+                <input
+                  ref={(el) => {
+                    fileRefs.current[i] = el;
+                  }}
+                  type="file"
+                  hidden
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    // ponytail: webview file input only gives a display name, not a
+                    // filesystem path — wire bytes on send still deferred.
+                    update(i, { value: f?.name ?? "" });
+                    e.target.value = "";
+                  }}
+                />
+                {p.value && (
+                  <button
+                    type="button"
+                    className="mp-file-clear"
+                    aria-label="Clear file"
+                    onClick={() => update(i, { value: "" })}
+                  >
+                    <X {...Ism} />
+                  </button>
+                )}
+              </div>
+            ) : envHover ? (
+              <VarField
+                className="mp-value"
+                value={p.value}
+                placeholder="Value"
+                env={envHover.env}
+                envPairs={envHover.envPairs}
+                globalPairs={envHover.globalPairs}
+                onSaveVar={envHover.onSaveVar}
+                onOpenEnv={envHover.onOpenEnv}
+                onChange={(value) => update(i, { value })}
+              />
+            ) : (
+              <input
+                className="mp-value"
+                placeholder="Value"
+                value={p.value}
+                onChange={(e) => update(i, { value: e.target.value })}
+              />
+            )}
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={() => remove(i)}
+              aria-label="Remove"
+            >
+              <Trash2 {...Ism} />
+            </button>
+          </div>
         );
       })}
       <button
         type="button"
         className="link-btn"
-        onClick={() =>
-          onChange([...pairs, { key: "", value: "", enabled: true }])
-        }
+        onClick={() => {
+          const filled = pairs.filter(
+            (p) => p.key || p.value || p.type === "file",
+          );
+          onChange([
+            ...filled,
+            { key: "", value: "", enabled: true, type: "text" },
+          ]);
+        }}
       >
         <Plus {...Ism} /> Add more
       </button>
@@ -800,6 +1246,68 @@ function TitleBar({
         </div>
       </div>
     </div>
+  );
+}
+
+function CollectionDocView({
+  collection,
+  onSaved,
+}: {
+  collection: Collection | undefined;
+  onSaved: (col: Collection) => void;
+}) {
+  const savedDesc = collection?.description ?? "";
+  const [text, setText] = useState(savedDesc);
+  const [saving, setSaving] = useState(false);
+  const lastSaved = useRef(savedDesc);
+  // Adopt the stored description once it (re)loads; keeps local edits otherwise.
+  useEffect(() => {
+    if (lastSaved.current !== savedDesc) {
+      lastSaved.current = savedDesc;
+      setText(savedDesc);
+    }
+  }, [savedDesc]);
+
+  if (!collection) {
+    return (
+      <div className="empty-main">
+        <h2>Collection not found</h2>
+        <p>This collection may have been deleted.</p>
+      </div>
+    );
+  }
+  const dirty = text !== savedDesc;
+
+  async function save() {
+    if (!collection) return;
+    setSaving(true);
+    try {
+      const updated = await invoke<Collection>("set_collection_description", {
+        id: collection.id,
+        description: text,
+      });
+      onSaved(updated);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <DocArticle
+      key={collection.id}
+      title={collection.name}
+      value={text}
+      onChange={setText}
+      placeholder="Document this collection — Markdown supported. Exports as the OpenAPI info description."
+      emptyHint="Document this collection…"
+      actions={
+        dirty ? (
+          <Button variant="primary" onClick={() => void save()} disabled={saving}>
+            {saving ? "Saving…" : "Save"}
+          </Button>
+        ) : null
+      }
+    />
   );
 }
 
@@ -1403,6 +1911,10 @@ function App() {
   const [query, setQuery] = useState<Pair[]>([
     { key: "", value: "", enabled: true },
   ]);
+  const [bodyPairs, setBodyPairs] = useState<Pair[]>([
+    { key: "", value: "", enabled: true },
+  ]);
+  const [pathPairs, setPathPairs] = useState<Pair[]>([]);
   const [urlBase, setUrlBase] = useState("");
   const [result, setResult] = useState<SendResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1437,6 +1949,12 @@ function App() {
   const [splitRatio, setSplitRatio] = useState(() => bootSession.splitRatio);
   const shellRef = useRef<HTMLDivElement>(null);
   const splitRef = useRef<HTMLDivElement>(null);
+  const tabStripRef = useRef<HTMLDivElement>(null);
+  const tabSearchRef = useRef<HTMLDivElement>(null);
+  const tabSearchInputRef = useRef<HTMLInputElement>(null);
+  const [tabSearchOpen, setTabSearchOpen] = useState(false);
+  const [tabSearchQuery, setTabSearchQuery] = useState("");
+  const [tabSearchIndex, setTabSearchIndex] = useState(0);
   const sidebarWidthRef = useRef(sidebarWidth);
   const splitRatioRef = useRef(splitRatio);
   sidebarWidthRef.current = sidebarWidth;
@@ -1464,10 +1982,36 @@ function App() {
   const [selectedId, setSelectedId] = useState<string | null>(
     () => bootSession.selectedId,
   );
+
+  // Keep the active tab visible when switching or opening beyond the edge.
+  useEffect(() => {
+    tabStripRef.current
+      ?.querySelector(".opentab.active")
+      ?.scrollIntoView({ inline: "nearest", block: "nearest" });
+  }, [selectedId, openTabs]);
   const [mcpStatus, setMcpStatus] = useState<McpStatus | null>(null);
   const [mcpLogsOpen, setMcpLogsOpen] = useState(false);
   const [mcpLogs, setMcpLogs] = useState<McpLogEntry[]>([]);
   const mcpLogPopRef = useRef<HTMLDivElement>(null);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importMode, setImportMode] = useState<"file" | "paste">("file");
+  const [importText, setImportText] = useState("");
+  const [importFileName, setImportFileName] = useState<string | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importBusy, setImportBusy] = useState(false);
+  const [importDragOver, setImportDragOver] = useState(false);
+  const importFileRef = useRef<HTMLInputElement>(null);
+  const [exportToast, setExportToast] = useState<{
+    path: string;
+    revealError?: string;
+  } | null>(null);
+
+  // Auto-dismiss the export toast; a manual Dismiss button also clears it.
+  useEffect(() => {
+    if (!exportToast) return;
+    const t = window.setTimeout(() => setExportToast(null), 8000);
+    return () => window.clearTimeout(t);
+  }, [exportToast]);
   const globalSearchRef = useRef<HTMLInputElement>(null);
   const [tabCache, setTabCache] = useState<
     Record<
@@ -1476,6 +2020,8 @@ function App() {
         draft: HttpRequest;
         headers: Pair[];
         query: Pair[];
+        bodyPairs: Pair[];
+        pathPairs: Pair[];
         urlBase: string;
         result: SendResult | null;
         error: string | null;
@@ -1490,11 +2036,22 @@ function App() {
     draft,
     headers,
     query,
+    bodyPairs,
+    pathPairs,
     urlBase,
     result,
     error,
   });
-  editorRef.current = { draft, headers, query, urlBase, result, error };
+  editorRef.current = {
+    draft,
+    headers,
+    query,
+    bodyPairs,
+    pathPairs,
+    urlBase,
+    result,
+    error,
+  };
 
   const sessionRef = useRef<WorkspaceSession>(bootSession);
   sessionRef.current = {
@@ -1528,6 +2085,8 @@ function App() {
     setDraft(null);
     setHeaders([{ key: "", value: "", enabled: true }]);
     setQuery([{ key: "", value: "", enabled: true }]);
+    setBodyPairs([{ key: "", value: "", enabled: true }]);
+    setPathPairs([]);
     setUrlBase("");
     setResult(null);
     setError(null);
@@ -1653,6 +2212,8 @@ function App() {
     draft: HttpRequest;
     headers: Pair[];
     query: Pair[];
+    bodyPairs: Pair[];
+    pathPairs: Pair[];
     urlBase: string;
     result: SendResult | null;
     error: string | null;
@@ -1662,43 +2223,65 @@ function App() {
       setDraft(cached.draft);
       setHeaders(cached.headers);
       setQuery(cached.query);
+      setBodyPairs(cached.bodyPairs);
+      setPathPairs(cached.pathPairs);
       setUrlBase(cached.urlBase);
       setResult(cached.result);
       setError(cached.error);
     } else {
-      setDraft({ ...r });
-      setHeaders(parsePairs(r.headersJson));
-      const { base, query: q } = splitUrl(r.url);
+      const n = normalizeRequest(r);
+      setDraft(n);
+      setHeaders(parsePairs(n.headersJson));
+      setBodyPairs(parsePairs(n.bodyPairsJson!));
+      const { base, query: q } = splitUrl(n.url);
       setUrlBase(base);
       setQuery(q);
+      setPathPairs(mergePathPairs(base, parsePairs(n.pathVarsJson!)));
       setResult(null);
       setError(null);
-      markSaved(r);
+      markSaved(n);
     }
     setSelectedId(r.id);
+  }
+
+  function curSnap(d: HttpRequest, h: Pair[], q: Pair[], bp: Pair[], pp: Pair[], base: string): SavedSnap {
+    return {
+      name: d.name,
+      description: d.description ?? "",
+      method: d.method,
+      url: joinUrl(base, q),
+      headersJson: pairsToJson(h),
+      body: d.body,
+      bodyType: d.bodyType ?? "none",
+      bodyPairsJson: bodyPairsToJson(bp),
+      authType: d.authType ?? "none",
+      authJson: d.authJson ?? "{}",
+      pathVarsJson: pairsToJson(pp),
+    };
   }
 
   function tabDirty(id: string): boolean {
     const saved = savedById[id];
     if (!saved) return false;
     if (id === selectedId && draft && selectedId !== SETTINGS_ID) {
-      return snapDirty(saved, {
-        name: draft.name,
-        method: draft.method,
-        url: joinUrl(urlBase, query),
-        headersJson: pairsToJson(headers),
-        body: draft.body,
-      });
+      return snapDirty(
+        saved,
+        curSnap(draft, headers, query, bodyPairs, pathPairs, urlBase),
+      );
     }
     const cached = tabCache[id];
     if (cached) {
-      return snapDirty(saved, {
-        name: cached.draft.name,
-        method: cached.draft.method,
-        url: joinUrl(cached.urlBase, cached.query),
-        headersJson: pairsToJson(cached.headers),
-        body: cached.draft.body,
-      });
+      return snapDirty(
+        saved,
+        curSnap(
+          cached.draft,
+          cached.headers,
+          cached.query,
+          cached.bodyPairs,
+          cached.pathPairs,
+          cached.urlBase,
+        ),
+      );
     }
     return false;
   }
@@ -1713,6 +2296,8 @@ function App() {
         draft: cur.draft!,
         headers: cur.headers,
         query: cur.query,
+        bodyPairs: cur.bodyPairs,
+        pathPairs: cur.pathPairs,
         urlBase: cur.urlBase,
         result: cur.result,
         error: cur.error,
@@ -1742,12 +2327,20 @@ function App() {
     setSettingsSection(wsSettingsId(id));
   }
 
+  function openCollectionDocs(collectionId: string) {
+    snapshotActive();
+    setEnvViewId(null);
+    const tid = coldocTabId(collectionId);
+    setOpenTabs((tabs) => (tabs.includes(tid) ? tabs : [...tabs, tid]));
+    setSelectedId(tid);
+  }
+
   function switchTab(id: string) {
     setEnvViewId(null);
     if (id === selectedId) return;
     snapshotActive();
-    if (id === SETTINGS_ID) {
-      setSelectedId(SETTINGS_ID);
+    if (id === SETTINGS_ID || id.startsWith(COLDOC_PREFIX)) {
+      setSelectedId(id);
       return;
     }
     const fromList = requests.find((r) => r.id === id);
@@ -1766,8 +2359,8 @@ function App() {
       const next = tabs.filter((t) => t !== id);
       if (id === selectedId) {
         const fallback = next[next.length - 1];
-        if (fallback === SETTINGS_ID) {
-          setSelectedId(SETTINGS_ID);
+        if (fallback === SETTINGS_ID || fallback?.startsWith(COLDOC_PREFIX)) {
+          setSelectedId(fallback);
         } else if (fallback) {
           const r = requests.find((x) => x.id === fallback);
           if (r) applyRequest(r, tabCache[fallback]);
@@ -1797,6 +2390,63 @@ function App() {
       });
     }
   }
+
+  function openTabSearch() {
+    setTabSearchOpen((was) => {
+      if (was) {
+        setTabSearchQuery("");
+        setTabSearchIndex(0);
+        return false;
+      }
+      setTabSearchQuery("");
+      setTabSearchIndex(0);
+      queueMicrotask(() => tabSearchInputRef.current?.focus());
+      return true;
+    });
+  }
+
+  function pickTabSearch(id: string) {
+    setTabSearchOpen(false);
+    setTabSearchQuery("");
+    setTabSearchIndex(0);
+    if (id.startsWith("env:")) {
+      openEnvView(id.slice(4));
+      return;
+    }
+    switchTab(id);
+  }
+
+  useEffect(() => {
+    if (!tabSearchOpen) return;
+    function onDoc(e: MouseEvent) {
+      if (tabSearchRef.current && !tabSearchRef.current.contains(e.target as Node)) {
+        setTabSearchOpen(false);
+        setTabSearchQuery("");
+        setTabSearchIndex(0);
+      }
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setTabSearchOpen(false);
+        setTabSearchQuery("");
+        setTabSearchIndex(0);
+      }
+    }
+    document.addEventListener("mousedown", onDoc);
+    window.addEventListener("keydown", onKey, true);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      window.removeEventListener("keydown", onKey, true);
+    };
+  }, [tabSearchOpen]);
+
+  useEffect(() => {
+    if (!tabSearchOpen) return;
+    tabSearchRef.current
+      ?.querySelector(".tab-search-item.kbd")
+      ?.scrollIntoView({ block: "nearest" });
+  }, [tabSearchOpen, tabSearchIndex, tabSearchQuery]);
 
   const refreshTree = useCallback(async (cid: string) => {
     if (!cid) return [] as HttpRequest[];
@@ -1885,10 +2535,73 @@ function App() {
   const headerCount = headers.filter(
     (h) => h.enabled !== false && h.key.trim(),
   ).length;
-  const bodyHasContent = Boolean(draft?.body?.trim());
+  const bodyType = asBodyType(draft?.bodyType);
+  const bodyHasContent =
+    bodyType === "urlencoded" || bodyType === "multipart"
+      ? bodyPairs.some((p) => p.enabled !== false && p.key.trim())
+      : bodyType !== "none" && Boolean(draft?.body?.trim());
+  const authType = asAuthType(draft?.authType);
+  const authFields = parseAuthJson(draft?.authJson ?? "{}");
+
+  function setBodyType(next: BodyType) {
+    if (!draft) return;
+    setDraft({ ...draft, bodyType: next });
+    setHeaders((h) => syncContentType(h, next));
+  }
+
+  function setAuthType(next: AuthType) {
+    if (!draft) return;
+    setDraft({
+      ...draft,
+      authType: next,
+      authJson: next === "none" ? "{}" : draft.authJson || "{}",
+    });
+  }
+
+  function patchAuth(patch: Record<string, string>) {
+    if (!draft) return;
+    setDraft({
+      ...draft,
+      authJson: JSON.stringify({ ...authFields, ...patch }),
+    });
+  }
+
+  function onUrlChange(next: string) {
+    const { base, query: q } = splitUrl(next);
+    setUrlBase(base);
+    setQuery(
+      q.length && (q[q.length - 1].key || q[q.length - 1].value)
+        ? [...q, { key: "", value: "", enabled: true }]
+        : q,
+    );
+    setPathPairs((prev) => mergePathPairs(base, prev));
+  }
   const activeEnvs = envs.filter((e) => !e.isGlobal);
   const activeEnv = activeEnvs.find((e) => e.isActive);
   const globalEnv = envs.find((e) => e.isGlobal) ?? null;
+  const activeVarMap = useMemo(
+    () =>
+      pairsToMap(
+        activeEnv
+          ? (envDrafts[activeEnv.id] ?? parseVars(activeEnv.varsJson))
+          : [],
+      ),
+    [activeEnv, envDrafts],
+  );
+  const globalVarMap = useMemo(
+    () =>
+      pairsToMap(
+        globalEnv
+          ? (envDrafts[globalEnv.id] ?? parseVars(globalEnv.varsJson))
+          : [],
+      ),
+    [globalEnv, envDrafts],
+  );
+  const resolvedUrl = useMemo(
+    () =>
+      resolveRequestUrl(composedUrl, pathPairs, activeVarMap, globalVarMap),
+    [composedUrl, pathPairs, activeVarMap, globalVarMap],
+  );
   const requestTitles = useMemo(() => {
     const m = new Map<string, string>();
     for (const item of searchIndex) {
@@ -1913,6 +2626,72 @@ function App() {
   const viewingEnv = envViewId
     ? envs.find((e) => e.id === envViewId) ?? null
     : null;
+
+  function buildTabSearchItems() {
+    const items: {
+      id: string;
+      name: string;
+      kind: "settings" | "request" | "env" | "docs";
+      method?: string;
+      dirty: boolean;
+      active: boolean;
+      haystack: string;
+    }[] = [];
+    for (const id of openTabs) {
+      if (id === SETTINGS_ID) {
+        items.push({
+          id,
+          name: "Settings",
+          kind: "settings",
+          dirty: false,
+          active: !envViewId && selectedId === SETTINGS_ID,
+          haystack: "settings",
+        });
+        continue;
+      }
+      const docColId = parseColdocTab(id);
+      if (docColId) {
+        const name =
+          collections.find((c) => c.id === docColId)?.name ?? "Docs";
+        items.push({
+          id,
+          name,
+          kind: "docs",
+          dirty: false,
+          active: !envViewId && selectedId === id,
+          haystack: `${name} docs documentation`.toLowerCase(),
+        });
+        continue;
+      }
+      const cached = tabCache[id]?.draft;
+      const fromList = requests.find((r) => r.id === id);
+      const r =
+        selectedId === id && draft ? draft : cached ?? fromList;
+      if (!r) continue;
+      const name = r.name || "Untitled";
+      items.push({
+        id,
+        name,
+        kind: "request",
+        method: r.method,
+        dirty: tabDirty(id),
+        active: !envViewId && id === selectedId,
+        haystack: `${r.method} ${name}`.toLowerCase(),
+      });
+    }
+    if (viewingEnv) {
+      items.push({
+        id: `env:${viewingEnv.id}`,
+        name: viewingEnv.name,
+        kind: "env",
+        dirty: false,
+        active: !!envViewId,
+        haystack: viewingEnv.name.toLowerCase(),
+      });
+    }
+    return items;
+  }
+
   const collection = collections.find((c) => c.id === collectionId);
 
   const refreshSearchIndex = useCallback(async () => {
@@ -2049,19 +2828,22 @@ function App() {
   async function save() {
     if (!draft) return null;
     const request: HttpRequest = {
-      ...draft,
+      ...normalizeRequest(draft),
       url: composedUrl,
       headersJson: pairsToJson(headers),
+      bodyPairsJson: bodyPairsToJson(bodyPairs),
+      pathVarsJson: pairsToJson(pathPairs),
     };
     const saved = await invoke<HttpRequest>("upsert_request", { request });
-    setDraft(saved);
-    markSaved(saved);
+    const n = normalizeRequest(saved);
+    setDraft(n);
+    markSaved(n);
     setTabCache((c) => {
       const { [saved.id]: _, ...rest } = c;
       return rest;
     });
     await refreshRequests(saved.collectionId, saved.id);
-    return saved;
+    return n;
   }
 
   async function refreshWorkspaceHistory() {
@@ -2099,6 +2881,7 @@ function App() {
     error?: string;
     body?: string;
     bodyPretty?: string | null;
+    headers?: [string, string][];
   }) {
     if (!workspaceId) return;
     const entry = await invoke<HistoryEntry>("insert_history", {
@@ -2115,6 +2898,9 @@ function App() {
         error: partial.error ?? null,
         body: partial.body ?? null,
         bodyPretty: partial.bodyPretty ?? null,
+        headersJson: partial.headers
+          ? JSON.stringify(partial.headers)
+          : null,
         createdAt: Date.now(),
       },
     });
@@ -2136,7 +2922,7 @@ function App() {
     setResult({
       status: h.status ?? 0,
       statusText: h.statusText ?? "",
-      headers: [],
+      headers: parseHistoryHeaders(h.headersJson),
       body: h.body ?? "",
       bodyPretty: h.bodyPretty ?? null,
       elapsedMs: h.elapsedMs ?? 0,
@@ -2167,6 +2953,11 @@ function App() {
           url: saved.url,
           headers: JSON.parse(saved.headersJson || "[]"),
           body: saved.body || null,
+          bodyType: saved.bodyType ?? "none",
+          bodyPairs: bodyPairsForSend(parsePairs(saved.bodyPairsJson || "[]")),
+          authType: saved.authType ?? "none",
+          authJson: saved.authJson ?? "{}",
+          pathVars: JSON.parse(saved.pathVarsJson || "[]"),
           activeVars,
           globalVars,
         },
@@ -2184,6 +2975,7 @@ function App() {
         sizeBytes: new TextEncoder().encode(res.body).length,
         body: res.body,
         bodyPretty: res.bodyPretty,
+        headers: res.headers,
       });
     } catch (e) {
       const msg = String(e);
@@ -2233,6 +3025,11 @@ function App() {
       url: kind === "websocket" ? "ws://localhost/" : "{{baseUrl}}/",
       headersJson: "[]",
       body: "",
+      bodyType: "none",
+      bodyPairsJson: "[]",
+      authType: "none",
+      authJson: "{}",
+      pathVarsJson: "[]",
       sortOrder: 0,
     };
     const saved = await invoke<HttpRequest>("upsert_request", { request: req });
@@ -2569,11 +3366,56 @@ function App() {
     });
   }
 
-  async function importOpenApiFile(file: File) {
+  function openImportModal() {
+    setImportOpen(true);
+    setImportMode("file");
+    setImportText("");
+    setImportFileName(null);
+    setImportError(null);
+    setImportBusy(false);
+    setImportDragOver(false);
+  }
+
+  function closeImportModal() {
+    if (importBusy) return;
+    setImportOpen(false);
+    setImportError(null);
+    setImportDragOver(false);
+  }
+
+  async function takeImportFile(file: File) {
+    const max = 100 * 1024 * 1024;
+    if (file.size > max) {
+      setImportError("File is larger than 100 MB.");
+      return;
+    }
+    const name = file.name.toLowerCase();
+    if (!/\.(json|ya?ml)$/.test(name) && file.type && !/json|ya?ml|text/.test(file.type)) {
+      setImportError("Use a .json, .yaml, or .yml OpenAPI file.");
+      return;
+    }
+    try {
+      const text = await file.text();
+      setImportText(text);
+      setImportFileName(file.name);
+      setImportMode("file");
+      setImportError(null);
+    } catch (e) {
+      setImportError(String(e));
+    }
+  }
+
+  async function importOpenApiSpec() {
     if (!workspaceId) return;
+    const spec = importText.trim();
+    if (!spec) {
+      setImportError("Drop a file, browse, or paste an OpenAPI spec.");
+      return;
+    }
+    setImportBusy(true);
+    setImportError(null);
     setError(null);
     try {
-      const spec = await file.text();
       const result = await invoke<{
         collection: Collection;
         requestCount: number;
@@ -2583,23 +3425,28 @@ function App() {
       await refreshEnvs();
       setCollectionId(result.collection.id);
       setRail("collections");
+      setImportOpen(false);
     } catch (e) {
-      setError(String(e));
+      setImportError(String(e));
+    } finally {
+      setImportBusy(false);
     }
   }
 
-  async function exportOpenApi() {
-    if (!collectionId) return;
+  async function exportOpenApi(targetId?: string) {
+    const cid = targetId ?? collectionId;
+    if (!cid) return;
     setError(null);
     try {
-      const spec = await invoke<string>("export_openapi", { collectionId });
-      const blob = new Blob([spec], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${collection?.name || "collection"}.openapi.json`;
-      a.click();
-      URL.revokeObjectURL(url);
+      const name =
+        collections.find((c) => c.id === cid)?.name ||
+        collection?.name ||
+        "collection";
+      const path = await invoke<string>("export_openapi", {
+        collectionId: cid,
+        fileName: name,
+      });
+      setExportToast({ path });
     } catch (e) {
       setError(String(e));
     }
@@ -2643,6 +3490,18 @@ function App() {
     });
     await refreshEnvs();
   }
+
+  const envHover: EnvVarHoverProps = {
+    env: activeEnv ? { id: activeEnv.id, name: activeEnv.name } : null,
+    envPairs: activeEnv
+      ? (envDrafts[activeEnv.id] ?? parseVars(activeEnv.varsJson))
+      : [],
+    globalPairs: globalEnv
+      ? (envDrafts[globalEnv.id] ?? parseVars(globalEnv.varsJson))
+      : [],
+    onSaveVar: saveEnvVar,
+    onOpenEnv: openEnvView,
+  };
 
   async function saveEnv(env: Environment) {
     const pairs = envDrafts[env.id] ?? parseVars(env.varsJson);
@@ -2814,6 +3673,9 @@ function App() {
         globalSearchRef.current?.focus();
         globalSearchRef.current?.select();
         break;
+      case "searchTabs":
+        openTabSearch();
+        break;
       case "toggleResponse":
         setResponseHidden((h) => !h);
         break;
@@ -2931,7 +3793,8 @@ function App() {
       if (m?.target === target && m?.id === id && m.kind === kind) return null;
       const r = btn.getBoundingClientRect();
       const width = 188;
-      const height = kind === "add" ? 128 : 120;
+      const height =
+        kind === "add" ? 128 : target === "collection" ? 200 : 120;
       const gap = 4;
       let left = r.right + gap;
       if (left + width > window.innerWidth - 8) {
@@ -3349,22 +4212,15 @@ function App() {
                       </div>
                     )}
                   </div>
-                  <label
-                    className="ui-btn ui-btn-secondary ui-btn-sm file-link"
+                  <button
+                    type="button"
+                    className="ui-btn ui-btn-secondary ui-btn-sm"
                     data-tip="Import OpenAPI"
+                    disabled={!workspaceId}
+                    onClick={openImportModal}
                   >
                     Import
-                    <input
-                      type="file"
-                      accept=".json,.yaml,.yml,application/json,text/yaml"
-                      hidden
-                      onChange={(e) => {
-                        const f = e.target.files?.[0];
-                        if (f) void importOpenApiFile(f);
-                        e.target.value = "";
-                      }}
-                    />
-                  </label>
+                  </button>
                 </div>
                 <div className="explorer-actions">
                   <button
@@ -3724,8 +4580,10 @@ function App() {
                                     }
                                   }
                                 }
-                                setUrlBase(splitUrl(h.url).base);
-                                setQuery(splitUrl(h.url).query);
+                                const { base, query: q } = splitUrl(h.url);
+                                setUrlBase(base);
+                                setQuery(q);
+                                setPathPairs((prev) => mergePathPairs(base, prev));
                                 if (draft)
                                   setDraft({
                                     ...draft,
@@ -3784,7 +4642,16 @@ function App() {
 
         <section className="workspace">
           <div className="opentabs">
-            <div className="opentabs-scroll">
+            <div
+              className="opentabs-scroll"
+              ref={tabStripRef}
+              onWheel={(e) => {
+                // Plain vertical wheel scrolls the strip horizontally (browser tab bar UX).
+                if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+                  e.currentTarget.scrollLeft += e.deltaY;
+                }
+              }}
+            >
               {openTabs.map((id) => {
                 if (id === SETTINGS_ID) {
                   return (
@@ -3812,6 +4679,43 @@ function App() {
                         onClick={(e) => {
                           e.stopPropagation();
                           closeTab(SETTINGS_ID);
+                        }}
+                      >
+                        <X {...Ism} />
+                      </button>
+                    </div>
+                  );
+                }
+                const docColId = parseColdocTab(id);
+                if (docColId) {
+                  const col = collections.find((c) => c.id === docColId);
+                  return (
+                    <div
+                      key={id}
+                      className={`opentab env-tab ${
+                        !envViewId && selectedId === id ? "active" : ""
+                      }`}
+                      onClick={() => switchTab(id)}
+                      onMouseDown={(e) => {
+                        if (e.button === 1) {
+                          e.preventDefault();
+                          closeTab(id);
+                        }
+                      }}
+                    >
+                      <span className="settings-tab-mark" aria-hidden>
+                        <BookOpen {...Ism} />
+                      </span>
+                      <span className="opentab-name">
+                        {col?.name ?? "Docs"}
+                      </span>
+                      <button
+                        type="button"
+                        className="opentab-close"
+                        aria-label="Close documentation"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          closeTab(id);
                         }}
                       >
                         <X {...Ism} />
@@ -3883,15 +4787,142 @@ function App() {
                   </button>
                 </div>
               )}
+              <button
+                type="button"
+                className="opentab-add"
+                data-tip="New request"
+                onClick={() => void newRequest()}
+              >
+                <Plus {...Imd} />
+              </button>
             </div>
-            <button
-              type="button"
-              className="opentab-add"
-              data-tip="New request"
-              onClick={() => void newRequest()}
-            >
-              <Plus {...Imd} />
-            </button>
+            <div className="opentabs-tools">
+              <div className="tab-search" ref={tabSearchRef}>
+                <button
+                  type="button"
+                  className={`tab-search-btn ${tabSearchOpen ? "open" : ""}`}
+                  data-tip="Search tabs"
+                  aria-label="Search tabs"
+                  aria-expanded={tabSearchOpen}
+                  onClick={() => openTabSearch()}
+                >
+                  <ChevronDown {...Ism} />
+                </button>
+                {tabSearchOpen && (
+                  <div className="tab-search-pop" role="dialog" aria-label="Search tabs">
+                    <div className="tab-search-head">
+                      <span>Search tabs</span>
+                      <span className="tab-search-keys">Ctrl+Shift+A</span>
+                    </div>
+                    <input
+                      ref={tabSearchInputRef}
+                      className="tab-search-input"
+                      placeholder="Search tabs"
+                      value={tabSearchQuery}
+                      onChange={(e) => {
+                        setTabSearchQuery(e.target.value);
+                        setTabSearchIndex(0);
+                      }}
+                      onKeyDown={(e) => {
+                        const q = tabSearchQuery.trim().toLowerCase();
+                        const shown = buildTabSearchItems().filter(
+                          (t) => !q || t.haystack.includes(q),
+                        );
+                        if (e.key === "ArrowDown") {
+                          e.preventDefault();
+                          if (shown.length === 0) return;
+                          setTabSearchIndex((i) => (i + 1) % shown.length);
+                          return;
+                        }
+                        if (e.key === "ArrowUp") {
+                          e.preventDefault();
+                          if (shown.length === 0) return;
+                          setTabSearchIndex(
+                            (i) => (i - 1 + shown.length) % shown.length,
+                          );
+                          return;
+                        }
+                        if (e.key === "Enter") {
+                          const pick =
+                            shown[
+                              Math.min(
+                                Math.max(tabSearchIndex, 0),
+                                Math.max(shown.length - 1, 0),
+                              )
+                            ];
+                          if (pick) {
+                            e.preventDefault();
+                            pickTabSearch(pick.id);
+                          }
+                        }
+                      }}
+                    />
+                    <div className="tab-search-list">
+                      {(() => {
+                        const q = tabSearchQuery.trim().toLowerCase();
+                        const shown = buildTabSearchItems().filter(
+                          (t) => !q || t.haystack.includes(q),
+                        );
+                        if (shown.length === 0) {
+                          return (
+                            <div className="tab-search-empty">No matching tabs</div>
+                          );
+                        }
+                        const kbd = Math.min(
+                          Math.max(tabSearchIndex, 0),
+                          shown.length - 1,
+                        );
+                        return shown.map((t, i) => (
+                          <button
+                            key={t.id}
+                            type="button"
+                            className={`tab-search-item ${
+                              t.active ? "active" : ""
+                            } ${i === kbd ? "kbd" : ""}`}
+                            onMouseEnter={() => setTabSearchIndex(i)}
+                            onClick={() => pickTabSearch(t.id)}
+                          >
+                            {t.kind === "settings" ? (
+                              <span className="settings-tab-mark" aria-hidden>
+                                <Settings {...Ism} />
+                              </span>
+                            ) : t.kind === "docs" ? (
+                              <span className="settings-tab-mark" aria-hidden>
+                                <BookOpen {...Ism} />
+                              </span>
+                            ) : t.kind === "env" ? (
+                              <span className="env-tab-mark" aria-hidden>
+                                <Braces {...Ism} />
+                              </span>
+                            ) : (
+                              <span className={methodClass(t.method!)}>
+                                {t.method}
+                              </span>
+                            )}
+                            <span className="opentab-name">{t.name}</span>
+                            {t.dirty && (
+                              <span
+                                className="opentab-dirty"
+                                data-tip="Unsaved changes"
+                                aria-label="Unsaved changes"
+                              />
+                            )}
+                          </button>
+                        ));
+                      })()}
+                    </div>
+                  </div>
+                )}
+              </div>
+              <Select
+                className="opentabs-env env-picker"
+                tip="Environment"
+                value={activeEnv?.id ?? ""}
+                options={activeEnvs.map((e) => ({ id: e.id, label: e.name }))}
+                onChange={(id) => void onEnvChange(id)}
+                placeholder="No environment"
+              />
+            </div>
           </div>
 
           {viewingEnv ? (
@@ -3952,8 +4983,8 @@ function App() {
                 </div>
               </div>
               <p className="env-view-hint">
-                Secrets stay on this device. Use {"{{var}}"} in URLs, headers, and
-                bodies.
+                Secrets stay on this device. Use {"{{var}}"} in URLs, params, headers,
+                body, and auth — hover a token to view or edit.
               </p>
               <div className="env-view-tools">
                 <input
@@ -3991,6 +5022,18 @@ function App() {
               workspaceId={workspaceId}
               onRenameWorkspace={(ws) => void renameWorkspace(ws)}
               onSwitchWorkspace={switchWorkspaceFromSettings}
+            />
+          ) : parseColdocTab(selectedId) ? (
+            <CollectionDocView
+              key={selectedId}
+              collection={collections.find(
+                (c) => c.id === parseColdocTab(selectedId),
+              )}
+              onSaved={(col) =>
+                setCollections((cs) =>
+                  cs.map((c) => (c.id === col.id ? col : c)),
+                )
+              }
             />
           ) : !draft ? (
             <div className="empty-main">
@@ -4050,6 +5093,15 @@ function App() {
                       </span>
                     </button>
                   )}
+                  {resolvedUrl.trim() && (
+                    <span
+                      className="req-crumb-url"
+                      title={resolvedUrl}
+                      data-tip={resolvedUrl}
+                    >
+                      {resolvedUrl}
+                    </span>
+                  )}
                 </div>
               )}
               <div className="url-bar">
@@ -4066,8 +5118,9 @@ function App() {
                 <UrlField
                   inputRef={urlRef}
                   className="url-input"
-                  value={urlBase}
-                  onChange={setUrlBase}
+                  value={composedUrl}
+                  onChange={onUrlChange}
+                  historyKey={selectedId ?? ""}
                   placeholder="{{baseUrl}}/path"
                   env={activeEnv ?? null}
                   envPairs={
@@ -4084,14 +5137,6 @@ function App() {
                   }
                   onSaveVar={saveEnvVar}
                   onOpenEnv={(id) => openEnvView(id)}
-                />
-                <Select
-                  className="env-picker"
-                  tip="Environment"
-                  value={activeEnv?.id ?? ""}
-                  options={activeEnvs.map((e) => ({ id: e.id, label: e.name }))}
-                  onChange={(id) => void onEnvChange(id)}
-                  placeholder="Env"
                 />
                 <Button
                   variant="primary"
@@ -4129,9 +5174,11 @@ function App() {
                   <div className="section-tabs">
                     {(
                       [
+                        ["overview", "Overview"],
                         ["params", "Params"],
                         ["headers", `Headers${headerCount ? ` (${headerCount})` : ""}`],
                         ["body", "Body"],
+                        ["auth", "Auth"],
                       ] as [ReqTab, string][]
                     ).map(([id, label]) => (
                       <button
@@ -4141,7 +5188,13 @@ function App() {
                         onClick={() => setReqTab(id)}
                       >
                         {label}
+                        {id === "overview" && (draft.description ?? "").trim() ? (
+                          <span className="dot" />
+                        ) : null}
                         {id === "body" && bodyHasContent ? (
+                          <span className="dot" />
+                        ) : null}
+                        {id === "auth" && authType !== "none" ? (
                           <span className="dot" />
                         ) : null}
                       </button>
@@ -4149,24 +5202,211 @@ function App() {
                   </div>
 
                   <div className="section-body">
+                    {reqTab === "overview" && (
+                      <DocArticle
+                        key={draft.id}
+                        title={draft.name || "Untitled"}
+                        meta={
+                          <div className="doc-url">
+                            <span className={methodClass(draft.method)}>
+                              {draft.method}
+                            </span>
+                            <span className="doc-url-text">
+                              {resolvedUrl || composedUrl}
+                            </span>
+                          </div>
+                        }
+                        value={draft.description ?? ""}
+                        onChange={(description) =>
+                          setDraft({ ...draft, description })
+                        }
+                        placeholder="Document this request — Markdown supported. Exports as the OpenAPI operation description."
+                        emptyHint="Document this request…"
+                      />
+                    )}
                     {reqTab === "params" && (
-                      <PairTable pairs={query} onChange={setQuery} keyLabel="Param" />
+                      <div className="params-stack">
+                        <div className="params-block">
+                          <PairTable
+                            pairs={query}
+                            onChange={setQuery}
+                            keyLabel="Param"
+                            tools
+                            envHover={envHover}
+                          />
+                        </div>
+                        {pathPairs.length > 0 && (
+                          <div className="params-block">
+                            <div className="params-label">Path variables</div>
+                            <PairTable
+                              pairs={pathPairs}
+                              onChange={setPathPairs}
+                              keyLabel="Variable"
+                              lockKeys
+                              tools
+                              envHover={envHover}
+                            />
+                          </div>
+                        )}
+                      </div>
                     )}
                     {reqTab === "headers" && (
                       <PairTable
                         pairs={headers}
                         onChange={setHeaders}
                         keyLabel="Header"
+                        keySuggestions={COMMON_HEADERS}
+                        envHover={envHover}
                       />
                     )}
                     {reqTab === "body" && (
-                      <div className="editor-fill">
-                        <CodeEditor
-                          value={draft.body}
-                          language="json"
-                          placeholder="{ }"
-                          onChange={(body) => setDraft({ ...draft, body })}
-                        />
+                      <div className="body-pane">
+                        <div className="body-type-bar" role="radiogroup" aria-label="Body type">
+                          {BODY_TYPE_OPTIONS.map((opt) => (
+                            <label key={opt.id} className="body-type-opt">
+                              <input
+                                type="radio"
+                                name="body-type"
+                                checked={bodyType === opt.id}
+                                onChange={() => setBodyType(opt.id)}
+                              />
+                              {opt.label}
+                            </label>
+                          ))}
+                        </div>
+                        {bodyType === "none" && (
+                          <div className="body-empty muted">
+                            This request does not have a body
+                          </div>
+                        )}
+                        {(bodyType === "json" || bodyType === "text") && (
+                          <div className="editor-fill">
+                            <CodeEditor
+                              value={draft.body}
+                              language={bodyType === "json" ? "json" : "text"}
+                              placeholder={bodyType === "json" ? "{ }" : ""}
+                              onChange={(body) => setDraft({ ...draft, body })}
+                              envHover={envHover}
+                            />
+                          </div>
+                        )}
+                        {bodyType === "urlencoded" && (
+                          <PairTable
+                            pairs={bodyPairs}
+                            onChange={setBodyPairs}
+                            keyLabel="Key"
+                            envHover={envHover}
+                          />
+                        )}
+                        {bodyType === "multipart" && (
+                          <MultipartTable
+                            pairs={bodyPairs}
+                            onChange={setBodyPairs}
+                            envHover={envHover}
+                          />
+                        )}
+                      </div>
+                    )}
+                    {reqTab === "auth" && (
+                      <div className="auth-pane">
+                        <div className="auth-row">
+                          <label className="auth-label">Authorization type</label>
+                          <Select
+                            className="auth-type-select"
+                            value={authType}
+                            options={AUTH_TYPE_OPTIONS.map((o) => ({
+                              id: o.id,
+                              label: o.label,
+                            }))}
+                            onChange={(id) => setAuthType(asAuthType(id))}
+                          />
+                        </div>
+                        {authType === "none" && (
+                          <div className="auth-empty">
+                            <p>No authorization type selected for this request</p>
+                            <p className="muted">
+                              Select an authorization type above
+                            </p>
+                          </div>
+                        )}
+                        {authType === "bearer" && (
+                          <div className="auth-fields">
+                            <label>
+                              Token
+                              <VarField
+                                className="ui-input"
+                                value={authFields.token ?? ""}
+                                onChange={(token) => patchAuth({ token })}
+                                placeholder="{{token}}"
+                                {...envHover}
+                              />
+                            </label>
+                          </div>
+                        )}
+                        {authType === "basic" && (
+                          <div className="auth-fields">
+                            <label>
+                              Username
+                              <VarField
+                                className="ui-input"
+                                value={authFields.username ?? ""}
+                                onChange={(username) =>
+                                  patchAuth({ username })
+                                }
+                                {...envHover}
+                              />
+                            </label>
+                            <label>
+                              Password
+                              <VarField
+                                className="ui-input"
+                                type="password"
+                                value={authFields.password ?? ""}
+                                onChange={(password) =>
+                                  patchAuth({ password })
+                                }
+                                {...envHover}
+                              />
+                            </label>
+                          </div>
+                        )}
+                        {authType === "apikey" && (
+                          <div className="auth-fields">
+                            <label>
+                              Key
+                              <VarField
+                                className="ui-input"
+                                value={authFields.key ?? ""}
+                                onChange={(key) => patchAuth({ key })}
+                                placeholder="X-Api-Key"
+                                {...envHover}
+                              />
+                            </label>
+                            <label>
+                              Value
+                              <VarField
+                                className="ui-input"
+                                value={authFields.value ?? ""}
+                                onChange={(value) => patchAuth({ value })}
+                                placeholder="{{apiKey}}"
+                                {...envHover}
+                              />
+                            </label>
+                            <label>
+                              Add to
+                              <select
+                                className="ui-input"
+                                value={authFields.in ?? "header"}
+                                onChange={(e) =>
+                                  patchAuth({ in: e.target.value })
+                                }
+                              >
+                                <option value="header">Header</option>
+                                <option value="query">Query param</option>
+                              </select>
+                            </label>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -4210,6 +5450,19 @@ function App() {
                       >
                         Headers
                         {result ? ` (${result.headers.length})` : ""}
+                      </button>
+                      <button
+                        type="button"
+                        className={resTab === "history" ? "active" : ""}
+                        onClick={() => {
+                          setResTab("history");
+                          if (selectedId) void refreshRequestHistory(selectedId);
+                        }}
+                      >
+                        History
+                        {requestHistory.length
+                          ? ` (${requestHistory.length})`
+                          : ""}
                       </button>
                     </div>
                     <div className="response-actions">
@@ -4346,7 +5599,7 @@ function App() {
                     </div>
                   </div>
 
-                  {!result && !error && (
+                  {!result && !error && resTab !== "history" && (
                     <div className="empty-response">
                       <div className="empty-illustration">⇄</div>
                       <h3>No response yet</h3>
@@ -4363,7 +5616,7 @@ function App() {
                     </div>
                   )}
 
-                  {error && (
+                  {error && resTab !== "history" && (
                     <div className="error-panel">
                       <h3>Request error — no response received</h3>
                       <pre>{error}</pre>
@@ -4417,6 +5670,80 @@ function App() {
                           <span />
                         </div>
                       ))}
+                    </div>
+                  )}
+
+                  {resTab === "history" && (
+                    <div className="res-history-tab">
+                      <div className="res-history-head">
+                        <span className="muted">Past responses for this request</span>
+                        <button
+                          type="button"
+                          className="ui-btn ui-btn-ghost ui-btn-sm"
+                          disabled={!selectedId || requestHistory.length === 0}
+                          onClick={() => {
+                            void (async () => {
+                              if (!selectedId) return;
+                              const ok = await dialogs.confirm({
+                                title: "Clear request history?",
+                                message:
+                                  "Delete all saved responses for this request.",
+                                confirmLabel: "Delete all",
+                                danger: true,
+                              });
+                              if (!ok) return;
+                              await invoke("clear_request_history", {
+                                requestId: selectedId,
+                              });
+                              setRequestHistory([]);
+                              await refreshWorkspaceHistory();
+                            })();
+                          }}
+                        >
+                          Delete all
+                        </button>
+                      </div>
+                      {requestHistory.length === 0 ? (
+                        <div className="req-history-empty">
+                          No recent responses for this request
+                        </div>
+                      ) : (
+                        <ul className="req-history-list res-history-list">
+                          {groupHistory(requestHistory).map(([label, rows]) => (
+                            <li key={label}>
+                              <div className="history-group-label">{label}</div>
+                              {rows.map((h) => (
+                                <button
+                                  key={h.id}
+                                  type="button"
+                                  className={`req-history-item ${
+                                    viewingHistoryId === h.id ? "current" : ""
+                                  }`}
+                                  onClick={() => applyHistoryEntry(h)}
+                                >
+                                  <span
+                                    className={
+                                      h.error
+                                        ? "bad"
+                                        : (h.status ?? 0) < 400
+                                          ? "ok"
+                                          : "bad"
+                                    }
+                                  >
+                                    {historyMeta(h)}
+                                  </span>
+                                  <span className="muted mono truncate">
+                                    {h.url}
+                                  </span>
+                                  {viewingHistoryId === h.id && (
+                                    <span className="req-history-check">✓</span>
+                                  )}
+                                </button>
+                              ))}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
                     </div>
                   )}
                 </div>
@@ -4511,6 +5838,35 @@ function App() {
                   }}
                 >
                   Rename
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    const id = treeMenu.id;
+                    setTreeMenu(null);
+                    openCollectionDocs(id);
+                  }}
+                >
+                  <span className="explorer-menu-ico" aria-hidden>
+                    <BookOpen {...I} />
+                  </span>
+                  Documentation
+                </button>
+                <div className="explorer-menu-sep" />
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    const id = treeMenu.id;
+                    setTreeMenu(null);
+                    void exportOpenApi(id);
+                  }}
+                >
+                  <span className="explorer-menu-ico" aria-hidden>
+                    <FileUp {...I} />
+                  </span>
+                  Export as OpenAPI 3.0
                 </button>
                 <div className="explorer-menu-sep" />
                 <button
@@ -4647,10 +6003,38 @@ function App() {
         );
         const keys = sourceKeys(srcPairs);
         const selected = new Set(envSync.selected);
+
+        const renderDiffSide = (
+          d: ReturnType<typeof diffTokens>,
+          side: "old" | "next",
+        ): ReactNode =>
+          (side === "old" ? d.old : d.next).map((seg, i) => {
+            if (seg.kind === "equal") {
+              return (
+                <span key={i} className="env-diff-eq">
+                  {seg.text}
+                </span>
+              );
+            }
+            if (seg.kind === "removed") {
+              return (
+                <span key={i} className="env-diff-del">
+                  {seg.text}
+                </span>
+              );
+            }
+            return (
+              <span key={i} className="env-diff-ins">
+                {seg.text}
+              </span>
+            );
+          });
+
         return (
           <Modal
             open
             title="Sync environment variables"
+            className="env-sync-modal"
             onClose={() => setEnvSync(null)}
             footer={
               <>
@@ -4668,6 +6052,15 @@ function App() {
             }
           >
             <div className="env-sync">
+              <p className="env-sync-desc">
+                Copy selected variables from the source into the target.
+                Selected keys are
+                <strong className="env-sync-pill add">added</strong>
+                if missing or
+                <strong className="env-sync-pill replace">replaced</strong>
+                if already present. Anything not selected is left untouched —
+                nothing is removed.
+              </p>
               <div className="env-sync-row">
                 <label className="env-sync-label">From</label>
                 <Select
@@ -4765,10 +6158,21 @@ function App() {
                 {keys.map((k) => {
                   const val =
                     srcPairs.find((p) => p.key.trim() === k)?.value ?? "";
+                  const tgtVal = tgtPairs.find(
+                    (p) => p.key.trim() === k,
+                  )?.value;
                   const exists = tgtKeys.has(k);
+                  const tagClass = exists ? "replace" : "add";
+                  const diffClass = exists
+                    ? val === tgtVal
+                      ? "same"
+                      : "changed"
+                    : "added";
                   return (
                     <li key={k}>
-                      <label className="env-sync-item">
+                      <label
+                        className={`env-sync-item diff-${diffClass}`}
+                      >
                         <input
                           type="checkbox"
                           checked={selected.has(k)}
@@ -4784,12 +6188,69 @@ function App() {
                         />
                         <span className="env-sync-key">{k}</span>
                         <span
-                          className={`env-sync-tag ${exists ? "exists" : "new"}`}
+                          className={`env-sync-tag ${tagClass}`}
+                          data-tip={
+                            exists
+                              ? `Replace existing "${k}" in target with source value`
+                              : `Add "${k}" to target as a new variable`
+                          }
                         >
-                          {exists ? "overwrite" : "new"}
+                          <span className="env-sync-tag-sign">
+                            {exists ? "~" : "+"}
+                          </span>
+                          {exists ? "replace" : "add"}
                         </span>
-                        <code className="env-sync-val" data-tip={val}>
-                          {val || "—"}
+                        <code
+                          className="env-sync-val"
+                          data-tip={
+                            exists
+                              ? val === tgtVal
+                                ? "value is identical — no change"
+                                : `old: ${tgtVal ?? ""}\nnew: ${val}`
+                              : `new value: ${val}`
+                          }
+                        >
+                          {exists ? (
+                            val === tgtVal ? (
+                              <span className="env-sync-d-same">
+                                <span className="env-sync-d-sign">=</span>
+                                <span className="env-sync-d-text">
+                                  {val || "—"}
+                                </span>
+                              </span>
+                            ) : (
+                              <span className="env-sync-d-change">
+                                <span className="env-sync-d-old">
+                                  <span className="env-sync-d-sign">−</span>
+                                  <span className="env-sync-d-text">
+                                    {renderDiffSide(
+                                      diffTokens(tgtVal ?? "", val),
+                                      "old",
+                                    )}
+                                  </span>
+                                </span>
+                                <span className="env-sync-d-mid" aria-hidden>
+                                  ·
+                                </span>
+                                <span className="env-sync-d-new">
+                                  <span className="env-sync-d-sign">+</span>
+                                  <span className="env-sync-d-text">
+                                    {renderDiffSide(
+                                      diffTokens(tgtVal ?? "", val),
+                                      "next",
+                                    )}
+                                  </span>
+                                </span>
+                              </span>
+                            )
+                          ) : (
+                            <span className="env-sync-d-add">
+                              <span className="env-sync-d-sign">+</span>
+                              <span className="env-sync-d-text">
+                                {val || "—"}
+                              </span>
+                            </span>
+                          )}
                         </code>
                       </label>
                     </li>
@@ -4800,6 +6261,194 @@ function App() {
           </Modal>
         );
       })()}
+
+      {importOpen && (
+        <Modal
+          open
+          className="import-openapi-modal"
+          title="Import OpenAPI"
+          onClose={closeImportModal}
+          footer={
+            <>
+              <Button
+                variant="ghost"
+                disabled={importBusy}
+                onClick={closeImportModal}
+              >
+                Close
+              </Button>
+              <Button
+                variant="primary"
+                disabled={importBusy || !importText.trim()}
+                onClick={() => void importOpenApiSpec()}
+              >
+                {importBusy ? "Importing…" : "Import"}
+              </Button>
+            </>
+          }
+        >
+          <div className="import-openapi">
+            <div className="import-mode-tabs" role="tablist" aria-label="Import method">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={importMode === "file"}
+                className={importMode === "file" ? "active" : undefined}
+                onClick={() => setImportMode("file")}
+              >
+                File
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={importMode === "paste"}
+                className={importMode === "paste" ? "active" : undefined}
+                onClick={() => setImportMode("paste")}
+              >
+                Paste
+              </button>
+            </div>
+
+            {importMode === "file" ? (
+              <div
+                className={`import-drop${importDragOver ? " over" : ""}${importFileName ? " has-file" : ""}`}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    importFileRef.current?.click();
+                  }
+                }}
+                onClick={() => importFileRef.current?.click()}
+                onDragEnter={(e) => {
+                  e.preventDefault();
+                  setImportDragOver(true);
+                }}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setImportDragOver(true);
+                }}
+                onDragLeave={(e) => {
+                  e.preventDefault();
+                  if (e.currentTarget === e.target) setImportDragOver(false);
+                }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setImportDragOver(false);
+                  const f = e.dataTransfer.files?.[0];
+                  if (f) void takeImportFile(f);
+                }}
+              >
+                <Upload className="import-drop-ico" size={28} strokeWidth={1.5} aria-hidden />
+                {importFileName ? (
+                  <>
+                    <p className="import-drop-title">{importFileName}</p>
+                    <p className="import-drop-hint">
+                      {importText.length.toLocaleString()} characters · click or drop to replace
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <p className="import-drop-title">
+                      Drop file here or click to browse
+                    </p>
+                    <p className="import-drop-hint">
+                      Supports JSON, YAML, YML · OpenAPI 3.x · Max 100 MB
+                    </p>
+                  </>
+                )}
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  className="import-browse-btn"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    importFileRef.current?.click();
+                  }}
+                >
+                  Browse files
+                </Button>
+                <input
+                  ref={importFileRef}
+                  type="file"
+                  accept=".json,.yaml,.yml,application/json,text/yaml,text/x-yaml"
+                  hidden
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) void takeImportFile(f);
+                    e.target.value = "";
+                  }}
+                />
+              </div>
+            ) : (
+              <label className="import-paste">
+                <span className="import-paste-label">OpenAPI JSON or YAML</span>
+                <textarea
+                  className="import-paste-area"
+                  spellCheck={false}
+                  placeholder={'{\n  "openapi": "3.0.3",\n  "info": { "title": "…" },\n  "paths": { … }\n}'}
+                  value={importText}
+                  onChange={(e) => {
+                    setImportText(e.target.value);
+                    setImportFileName(null);
+                    setImportError(null);
+                  }}
+                />
+              </label>
+            )}
+
+            {importError && (
+              <p className="import-error" role="alert">
+                {importError}
+              </p>
+            )}
+          </div>
+        </Modal>
+      )}
+
+      {exportToast && (
+        <div className="export-toast" role="status">
+          <FileUp {...I} aria-hidden />
+          <div className="export-toast-text">
+            <span className="export-toast-title">Collection exported</span>
+            <span className="export-toast-path mono" data-tip={exportToast.path}>
+              {exportToast.path}
+            </span>
+            {exportToast.revealError && (
+              <span className="export-toast-err" role="alert">
+                {exportToast.revealError}
+              </span>
+            )}
+          </div>
+          <button
+            type="button"
+            className="text-action"
+            onClick={() => {
+              void invoke("reveal_path", { path: exportToast.path })
+                .then(() =>
+                  setExportToast({ path: exportToast.path }),
+                )
+                .catch((e) =>
+                  setExportToast({
+                    path: exportToast.path,
+                    revealError: String(e),
+                  }),
+                );
+            }}
+          >
+            Show in folder
+          </button>
+          <button
+            type="button"
+            className="export-toast-close"
+            aria-label="Dismiss"
+            onClick={() => setExportToast(null)}
+          >
+            <X {...Ism} />
+          </button>
+        </div>
+      )}
 
       <footer className="statusbar">
         <div className="statusbar-left">
@@ -4862,7 +6511,12 @@ function App() {
             )}
           </div>
         </div>
-        <span className="muted mono truncate">{composedUrl || "—"}</span>
+        <span
+          className="muted mono truncate"
+          data-tip={resolvedUrl.trim() || undefined}
+        >
+          {resolvedUrl.trim() || "—"}
+        </span>
       </footer>
     </div>
   );

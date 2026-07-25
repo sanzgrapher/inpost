@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Inpost MCP stdio entry — Outpost-style proxy to the desktop HTTP bridge.
+ * Inpost MCP stdio entry — proxies tool calls to the desktop HTTP bridge.
  * Requestly-style packaging: McpServer + StdioServerTransport + registerTools.
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";

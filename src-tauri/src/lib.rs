@@ -62,6 +62,15 @@ fn rename_collection(
 }
 
 #[tauri::command]
+fn set_collection_description(
+    state: tauri::State<'_, Arc<Db>>,
+    id: String,
+    description: String,
+) -> Result<Collection, String> {
+    state.set_collection_description(&id, description)
+}
+
+#[tauri::command]
 fn delete_collection(state: tauri::State<'_, Arc<Db>>, id: String) -> Result<(), String> {
     state.delete_collection(&id)
 }
@@ -222,12 +231,131 @@ fn import_openapi(
     openapi_ops::import_into_db(&state, &spec, &workspace_id)
 }
 
+/// Export straight to the user's Downloads folder; returns the written path.
 #[tauri::command]
 fn export_openapi(
     state: tauri::State<'_, Arc<Db>>,
     collection_id: String,
+    file_name: String,
 ) -> Result<String, String> {
-    openapi_ops::export_from_db(&state, &collection_id)
+    let spec = openapi_ops::export_from_db(&state, &collection_id)?;
+    // Prefer XDG Downloads; create ~/Downloads when the dir is missing (common on bare WSL).
+    let dir = dirs::download_dir()
+        .or_else(|| dirs::home_dir().map(|h| h.join("Downloads")))
+        .ok_or("No Downloads folder found")?;
+    if !dir.exists() {
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    }
+    // Collection names are user input — keep only filesystem-safe chars.
+    let stem: String = file_name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || " ._-".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let stem = stem.trim().trim_matches('.');
+    let stem = if stem.is_empty() { "collection" } else { stem };
+    let mut path = dir.join(format!("{stem}.openapi.json"));
+    let mut n = 1;
+    while path.exists() {
+        path = dir.join(format!("{stem} ({n}).openapi.json"));
+        n += 1;
+    }
+    std::fs::write(&path, spec).map_err(|e| e.to_string())?;
+    Ok(path.display().to_string())
+}
+
+/// Reveal a file in the system file manager.
+///
+/// Uses tauri-plugin-opener first (Explorer / Finder / FileManager1+portal).
+/// Falls back for environments without a desktop portal — notably WSL, which
+/// has no `org.freedesktop.portal.OpenURI` and must open Windows Explorer via
+/// `explorer.exe` + `wslpath`.
+#[tauri::command]
+fn reveal_path(path: String) -> Result<(), String> {
+    let p = std::path::PathBuf::from(&path);
+    if !p.exists() {
+        return Err(format!("File not found: {path}"));
+    }
+    if tauri_plugin_opener::reveal_item_in_dir(&p).is_ok() {
+        return Ok(());
+    }
+    reveal_path_fallback(&p)
+}
+
+fn reveal_path_fallback(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        std::process::Command::new("explorer")
+            .arg(format!("/select,{}", path.display()))
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let status = std::process::Command::new("open")
+            .args(["-R"])
+            .arg(path)
+            .status()
+            .map_err(|e| e.to_string())?;
+        if status.success() {
+            return Ok(());
+        }
+        return Err("Could not reveal file in Finder".into());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if is_wsl() {
+            let win = wsl_to_windows_path(path)?;
+            // explorer.exe returns non-zero even on success; just spawn.
+            std::process::Command::new("explorer.exe")
+                .arg(format!("/select,{win}"))
+                .spawn()
+                .map_err(|e| format!("Could not open Windows Explorer: {e}"))?;
+            return Ok(());
+        }
+        let dir = path.parent().unwrap_or(path);
+        std::process::Command::new("xdg-open")
+            .arg(dir)
+            .spawn()
+            .map_err(|_| {
+                "Could not open the folder (no file manager / xdg-open).".to_string()
+            })?;
+        Ok(())
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+    {
+        let _ = path;
+        Err("Reveal is not supported on this platform".into())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn is_wsl() -> bool {
+    std::fs::read_to_string("/proc/version")
+        .map(|v| v.to_ascii_lowercase().contains("microsoft"))
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "linux")]
+fn wsl_to_windows_path(path: &std::path::Path) -> Result<String, String> {
+    let out = std::process::Command::new("wslpath")
+        .arg("-w")
+        .arg(path)
+        .output()
+        .map_err(|e| format!("wslpath failed: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "wslpath failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 #[tauri::command]
@@ -306,6 +434,7 @@ pub fn run() {
             list_collections,
             create_collection,
             rename_collection,
+            set_collection_description,
             delete_collection,
             list_folders,
             create_folder,
@@ -326,6 +455,7 @@ pub fn run() {
             mcp_logs,
             import_openapi,
             export_openapi,
+            reveal_path,
             list_workspace_history,
             list_request_history,
             insert_history,

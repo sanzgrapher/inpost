@@ -1,0 +1,135 @@
+{
+  "info": {
+    "title": "PokéAPI v2",
+    "version": "1.0.0"
+  },
+  "openapi": "3.0.3",
+  "paths": {
+    "/": {
+      "get": {
+        "operationId": "untitled_5",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "Untitled (5)"
+      }
+    },
+    "/ability/battle-armor": {
+      "get": {
+        "operationId": "ability_battle_armor",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "Ability — Battle Armor"
+      }
+    },
+    "/berry/1": {
+      "get": {
+        "operationId": "berry_cheri",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "Berry — Cheri"
+      }
+    },
+    "/evolution-chain/67": {
+      "get": {
+        "operationId": "evolution_chain_eevee",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "Evolution chain — Eevee"
+      }
+    },
+    "/item/234": {
+      "get": {
+        "operationId": "item_metal_powder",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "Item — Metal Powder"
+      }
+    },
+    "/move/144": {
+      "get": {
+        "operationId": "move_transform",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "Move — Transform"
+      }
+    },
+    "/pokemon-species/aegislash": {
+      "get": {
+        "operationId": "species_aegislash",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "Species — Aegislash"
+      }
+    },
+    "/pokemon/132/encounters": {
+      "get": {
+        "operationId": "ditto_encounters",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "Ditto encounters"
+      }
+    },
+    "/pokemon/ditto": {
+      "get": {
+        "operationId": "get_ditto",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "Get Ditto"
+      }
+    },
+    "/pokemon?limit=20&offset=0": {
+      "get": {
+        "operationId": "list_pok_mon",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "List Pokémon"
+      }
+    },
+    "/type/3?dfgdfg=&dfgdfg=": {
+      "get": {
+        "operationId": "type_flying",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "Type — Flying"
+      }
+    }
+  },
+  "servers": [
+    {
+      "url": "{{baseUrl}}"
+    }
+  ]
+}

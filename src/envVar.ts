@@ -56,6 +56,95 @@ export function pairsToMap(
   return out;
 }
 
+/** Resolve `{{key}}` tokens. Missing keys are left as-is. Active wins over global. */
+export function substituteVars(
+  input: string,
+  active: Record<string, string>,
+  global: Record<string, string> = {},
+): string {
+  return input.replace(/\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}/g, (m, key: string) => {
+    if (Object.prototype.hasOwnProperty.call(active, key)) return active[key];
+    if (Object.prototype.hasOwnProperty.call(global, key)) return global[key];
+    return m;
+  });
+}
+
+/**
+ * Percent-encode a query key/value while leaving `{{var}}` tokens literal.
+ * encodeURIComponent turns `{{` into `%7B%7B`, which breaks URL-bar hover
+ * highlighting and env substitution — keep those spans intact.
+ */
+export function encodeQueryPart(s: string): string {
+  const re = /\{\{\s*[^{}]+?\s*\}\}/g;
+  let out = "";
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(s))) {
+    out += encodeURIComponent(s.slice(last, m.index));
+    out += m[0];
+    last = m.index + m[0].length;
+  }
+  out += encodeURIComponent(s.slice(last));
+  return out;
+}
+
+/** Replace `:name` and `{name}` (not `{{name}}`) path placeholders. */
+export function applyPathVars(
+  url: string,
+  pairs: { key: string; value: string; enabled?: boolean }[],
+): string {
+  let out = url;
+  for (const p of pairs) {
+    if (p.enabled === false) continue;
+    const k = p.key.trim();
+    if (!k) continue;
+    out = replaceSingleBraces(out, k, p.value);
+    out = out.split(`:${k}`).join(p.value);
+  }
+  return out;
+}
+
+function replaceSingleBraces(url: string, name: string, value: string): string {
+  const needle = `{${name}}`;
+  let out = "";
+  let i = 0;
+  while (i < url.length) {
+    const at = url.indexOf(needle, i);
+    if (at < 0) {
+      out += url.slice(i);
+      break;
+    }
+    const beforeOk = at === 0 || url[at - 1] !== "{";
+    const after = at + needle.length;
+    const afterOk = after >= url.length || url[after] !== "}";
+    if (beforeOk && afterOk) {
+      out += url.slice(i, at) + value;
+      i = after;
+    } else {
+      out += url.slice(i, at + 1);
+      i = at + 1;
+    }
+  }
+  return out;
+}
+
+/**
+ * Same order as the Rust send path: env-sub path values → apply path vars →
+ * env-sub the final URL. Missing `{{vars}}` stay as tokens.
+ */
+export function resolveRequestUrl(
+  url: string,
+  pathPairs: { key: string; value: string; enabled?: boolean }[],
+  active: Record<string, string>,
+  global: Record<string, string> = {},
+): string {
+  const path = pathPairs.map((p) => ({
+    ...p,
+    value: substituteVars(p.value, active, global),
+  }));
+  return substituteVars(applyPathVars(url, path), active, global);
+}
+
 // Runnable self-check: `npx tsx src/envVar.ts`
 declare const process: { argv: string[] } | undefined;
 if (typeof process !== "undefined" && process.argv[1]?.includes("envVar")) {
@@ -80,6 +169,46 @@ if (typeof process !== "undefined" && process.argv[1]?.includes("envVar")) {
     Object.keys(pairsToMap([{ key: " x ", value: "y", enabled: true }]))[0] ===
       "x",
     "trim key",
+  );
+
+  console.assert(
+    substituteVars("{{baseUrl}}/v1?t={{token}}", { baseUrl: "https://a" }, { token: "g" }) ===
+      "https://a/v1?t=g",
+    "substitute active+global",
+  );
+  console.assert(
+    substituteVars("{{missing}}/x", {}, {}) === "{{missing}}/x",
+    "missing left intact",
+  );
+  console.assert(
+    encodeQueryPart("{{limit}}") === "{{limit}}",
+    "encode keeps {{var}}",
+  );
+  console.assert(
+    encodeQueryPart("a b{{limit}}c d") === "a%20b{{limit}}c%20d",
+    "encode around {{var}}",
+  );
+  console.assert(
+    encodeQueryPart("x&y") === "x%26y",
+    "encode still escapes &",
+  );
+  console.assert(
+    tokenizeUrl("?limit={{limit}}&offset={{offset}}").filter((t) => t.kind === "var")
+      .length === 2,
+    "tokenize query vars",
+  );
+  console.assert(
+    applyPathVars("https://x/{{id}}/:id/{id}", [{ key: "id", value: "3" }]) ===
+      "https://x/{{id}}/3/3",
+    "path vars skip {{id}}",
+  );
+  console.assert(
+    resolveRequestUrl(
+      "{{baseUrl}}/type/:id",
+      [{ key: "id", value: "{{typeId}}" }],
+      { baseUrl: "https://pokeapi.co/api/v2", typeId: "3" },
+    ) === "https://pokeapi.co/api/v2/type/3",
+    "resolve pipeline",
   );
 
   console.log("envVar self-check ok");

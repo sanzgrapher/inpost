@@ -7,10 +7,16 @@ type RequestRow = {
   collectionId: string;
   folderId?: string | null;
   name: string;
+  description?: string;
   method: string;
   url: string;
   headersJson: string;
   body: string;
+  bodyType?: string;
+  bodyPairsJson?: string;
+  authType?: string;
+  authJson?: string;
+  pathVarsJson?: string;
   sortOrder?: number;
 };
 
@@ -21,6 +27,35 @@ type EnvRow = {
   isActive: boolean;
   varsJson: string;
 };
+
+/**
+ * Shared agent guidance: docs are OpenAPI-valid CommonMark, not rich-text JSON.
+ * Kept short enough for tool descriptions but explicit about can / cannot.
+ */
+const DOC_FIELD_GUIDE = [
+  "Documentation is CommonMark Markdown stored as a plain string.",
+  "OpenAPI mapping: request.description → operation.description; collection.description → info.description.",
+  "ALLOWED: # headings, paragraphs, **bold**, *italic*, ~~strike~~, -/* lists, 1. numbered lists, > quotes,",
+  "`inline code`, fenced ```code blocks```, [links](https://…), ![images](https://…) via remote URL only, --- rules.",
+  "NOT AVAILABLE: raw HTML/script (escaped, never executed); Editor.js / rich-text JSON; uploaded or pasted image files",
+  "(no local image hosting — use https URLs); folder-level docs; structured OpenAPI schemas/examples inside the field",
+  "(use request body/headers/auth fields for those). Empty string clears the docs.",
+].join(" ");
+
+const descriptionParam = z
+  .string()
+  .optional()
+  .describe(
+    "Markdown documentation for this request (OpenAPI operation.description). " +
+      DOC_FIELD_GUIDE,
+  );
+
+const collectionDescriptionParam = z
+  .string()
+  .describe(
+    "Markdown documentation for this collection (OpenAPI info.description). " +
+      DOC_FIELD_GUIDE,
+  );
 
 export function registerTools(server: McpServer) {
   server.tool(
@@ -40,7 +75,7 @@ export function registerTools(server: McpServer) {
 
   server.tool(
     "list_collections",
-    "List collections in a workspace (or all if workspaceId omitted)",
+    "List collections in a workspace (or all if workspaceId omitted). Each row includes description (Markdown / OpenAPI info.description).",
     { workspaceId: z.string().optional() },
     async ({ workspaceId }) =>
       toolText(
@@ -55,20 +90,42 @@ export function registerTools(server: McpServer) {
 
   server.tool(
     "create_collection",
-    "Create a collection in a workspace",
+    "Create a collection in a workspace. Optional description is collection-level documentation. " +
+      DOC_FIELD_GUIDE,
     {
       name: z.string().min(1).max(200),
       workspaceId: z.string().min(1),
+      description: collectionDescriptionParam.optional(),
     },
-    async ({ name, workspaceId }) =>
+    async ({ name, workspaceId, description }) =>
       toolText(
-        await bridge("POST", "/v1/collections", { name, workspaceId }),
+        await bridge("POST", "/v1/collections", {
+          name,
+          workspaceId,
+          description: description ?? "",
+        }),
+      ),
+  );
+
+  server.tool(
+    "set_collection_description",
+    "Set or clear a collection's documentation (shown in the app Docs tab; exports as OpenAPI info.description). " +
+      DOC_FIELD_GUIDE,
+    {
+      collectionId: z.string().min(1),
+      description: collectionDescriptionParam,
+    },
+    async ({ collectionId, description }) =>
+      toolText(
+        await bridge("PATCH", `/v1/collections/${collectionId}`, {
+          description,
+        }),
       ),
   );
 
   server.tool(
     "list_requests",
-    "List requests in a collection",
+    "List requests in a collection (includes description Markdown when set)",
     { collectionId: z.string().min(1) },
     async ({ collectionId }) =>
       toolText(
@@ -148,7 +205,7 @@ export function registerTools(server: McpServer) {
 
   server.tool(
     "get_request",
-    "Get a request by id",
+    "Get a request by id (includes description Markdown / OpenAPI operation.description when set)",
     { requestId: z.string().min(1) },
     async ({ requestId }) =>
       toolText(await bridge("GET", `/v1/requests/${requestId}`)),
@@ -156,14 +213,21 @@ export function registerTools(server: McpServer) {
 
   server.tool(
     "create_request",
-    "Create an HTTP request",
+    "Create an HTTP request. Optional description is request documentation shown in Overview. " +
+      DOC_FIELD_GUIDE,
     {
       collectionId: z.string().min(1),
       name: z.string().min(1).max(200),
+      description: descriptionParam,
       method: z.string().default("GET"),
       url: z.string().min(1),
       headersJson: z.string().optional(),
       body: z.string().optional(),
+      bodyType: z.string().optional(),
+      bodyPairsJson: z.string().optional(),
+      authType: z.string().optional(),
+      authJson: z.string().optional(),
+      pathVarsJson: z.string().optional(),
       folderId: z.string().optional(),
     },
     async (args) => {
@@ -172,10 +236,16 @@ export function registerTools(server: McpServer) {
         collectionId: args.collectionId,
         folderId: args.folderId ?? null,
         name: args.name,
+        description: args.description ?? "",
         method: args.method || "GET",
         url: args.url,
         headersJson: args.headersJson ?? "[]",
         body: args.body ?? "",
+        bodyType: args.bodyType ?? (args.body ? "json" : "none"),
+        bodyPairsJson: args.bodyPairsJson ?? "[]",
+        authType: args.authType ?? "none",
+        authJson: args.authJson ?? "{}",
+        pathVarsJson: args.pathVarsJson ?? "[]",
       };
       return toolText(await bridge("POST", "/v1/requests", row));
     },
@@ -183,25 +253,47 @@ export function registerTools(server: McpServer) {
 
   server.tool(
     "update_request",
-    "Update an HTTP request",
+    "Update an HTTP request. Omit description to keep existing docs; pass description (including \"\") to set/clear. " +
+      DOC_FIELD_GUIDE,
     {
       requestId: z.string().min(1),
       collectionId: z.string().min(1),
       name: z.string().min(1).max(200),
+      description: descriptionParam,
       method: z.string(),
       url: z.string().min(1),
       headersJson: z.string().optional(),
       body: z.string().optional(),
+      bodyType: z.string().optional(),
+      bodyPairsJson: z.string().optional(),
+      authType: z.string().optional(),
+      authJson: z.string().optional(),
+      pathVarsJson: z.string().optional(),
     },
     async (args) => {
+      // Preserve docs when the agent omits description (omit ≠ clear).
+      let description = args.description;
+      if (description === undefined) {
+        const existing = await bridge<RequestRow>(
+          "GET",
+          `/v1/requests/${args.requestId}`,
+        );
+        description = existing.description ?? "";
+      }
       const row: RequestRow = {
         id: args.requestId,
         collectionId: args.collectionId,
         name: args.name,
+        description,
         method: args.method,
         url: args.url,
         headersJson: args.headersJson ?? "[]",
         body: args.body ?? "",
+        bodyType: args.bodyType ?? (args.body ? "json" : "none"),
+        bodyPairsJson: args.bodyPairsJson ?? "[]",
+        authType: args.authType ?? "none",
+        authJson: args.authJson ?? "{}",
+        pathVarsJson: args.pathVarsJson ?? "[]",
       };
       return toolText(
         await bridge("PUT", `/v1/requests/${args.requestId}`, row),
@@ -277,7 +369,7 @@ export function registerTools(server: McpServer) {
 
   server.tool(
     "set_active_environment",
-    "Set the active environment",
+    "Change the UI's active (non-global) environment. Prefer run_request({ environmentId }) when you only need one-off Local vs Prod runs — that does not flip the active env.",
     { environmentId: z.string().min(1) },
     async ({ environmentId }) =>
       toolText(
@@ -287,10 +379,23 @@ export function registerTools(server: McpServer) {
 
   server.tool(
     "run_request",
-    "Execute an HTTP request via the desktop app (uses active env unless environmentId given)",
+    [
+      "Execute a saved HTTP request via the desktop app.",
+      "Vars: Global env always merges in; the chosen non-global env supplies {{var}} / path values.",
+      "Pass environmentId to run against that env for this call only (does NOT change the UI active env).",
+      "Omit environmentId to use whatever is currently active.",
+      "Compare Local vs Prod: call run_request twice with the same requestId and different environmentIds",
+      "(from list_environments); compare status, resolvedUrl, and body in the two results.",
+      "Both runs appear in History.",
+    ].join(" "),
     {
-      requestId: z.string().min(1),
-      environmentId: z.string().optional(),
+      requestId: z.string().min(1).describe("Id from list_requests / get_request"),
+      environmentId: z
+        .string()
+        .optional()
+        .describe(
+          "Non-global environment id from list_environments. Omit = use active env. Pass Local id then Prod id on two calls to compare the same request.",
+        ),
     },
     async ({ requestId, environmentId }) =>
       toolText(
@@ -303,7 +408,7 @@ export function registerTools(server: McpServer) {
 
   server.tool(
     "import_openapi",
-    "Import an OpenAPI 3.x JSON/YAML spec into a new collection",
+    "Import an OpenAPI 3.x JSON/YAML spec into a new collection. Maps info.description → collection docs and operation.description → each request's description (Markdown).",
     {
       spec: z.string().min(1),
       workspaceId: z.string().min(1),
@@ -316,7 +421,7 @@ export function registerTools(server: McpServer) {
 
   server.tool(
     "export_openapi",
-    "Export a collection as OpenAPI 3.0.3 JSON",
+    "Export a collection as OpenAPI 3.0.3 JSON (includes collection description as info.description and each request description as operation.description)",
     { collectionId: z.string().min(1) },
     async ({ collectionId }) =>
       toolText(

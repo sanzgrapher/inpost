@@ -12,8 +12,12 @@ import {
   filterIndex,
   parseSearchQuery,
   scopeChips,
+  scopeSuggestions,
   serializeSearchQuery,
+  trailingScope,
+  uncommitLastChip,
   type IndexItem,
+  type ScopeSuggestion,
   type SearchScope,
 } from "./searchQuery";
 import { methodClass, methodLabel } from "./methodStyle";
@@ -22,6 +26,7 @@ export type { IndexItem };
 
 const I = { size: 14, strokeWidth: 1.75 } as const;
 const Ism = { size: 12, strokeWidth: 1.75 } as const;
+const HISTORY_CAP = 60;
 
 type Props = {
   query: string;
@@ -47,6 +52,9 @@ export function GlobalSearch({
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
+  // Controlled input + chips kill the browser undo stack — keep our own.
+  const undoStack = useRef<string[]>([]);
+  const redoStack = useRef<string[]>([]);
   const scope = useMemo(() => parseSearchQuery(query), [query]);
   const chips = useMemo(() => scopeChips(scope), [scope]);
   const filter = useMemo(() => effectiveScope(scope), [scope]);
@@ -54,8 +62,22 @@ export function GlobalSearch({
     if (!query.trim() && chips.length === 0) return [];
     return filterIndex(index, scope, { workspaceId }).slice(0, 40);
   }, [index, query, scope, workspaceId, chips.length]);
+  const trail = useMemo(() => trailingScope(scope.text), [scope.text]);
+  const suggestions = useMemo(
+    () =>
+      trail ? scopeSuggestions(index, trail, scope, { workspaceId }) : [],
+    [index, trail, scope, workspaceId],
+  );
+  // Suggestions come first, so the highlight runs across both lists.
+  const total = suggestions.length + hits.length;
 
-  useEffect(() => setActive(0), [hits]);
+  useEffect(() => setActive(0), [hits, suggestions]);
+
+  useEffect(() => {
+    rootRef.current
+      ?.querySelector(".search-hit.active")
+      ?.scrollIntoView({ block: "nearest" });
+  }, [active]);
 
   useEffect(() => {
     if (!open) return;
@@ -68,14 +90,56 @@ export function GlobalSearch({
     return () => document.removeEventListener("mousedown", onDoc);
   }, [open]);
 
+  function commitQuery(next: string) {
+    if (next === query) return;
+    undoStack.current.push(query);
+    if (undoStack.current.length > HISTORY_CAP) undoStack.current.shift();
+    redoStack.current = [];
+    onQuery(next);
+  }
+
+  function undoQuery() {
+    const prev = undoStack.current.pop();
+    if (prev === undefined) return;
+    redoStack.current.push(query);
+    onQuery(prev);
+  }
+
+  function redoQuery() {
+    const next = redoStack.current.pop();
+    if (next === undefined) return;
+    undoStack.current.push(query);
+    onQuery(next);
+  }
+
   function setScope(next: SearchScope) {
-    onQuery(serializeSearchQuery(next));
+    commitQuery(serializeSearchQuery(next));
   }
 
   function select(item: IndexItem) {
     onOpen(item);
-    onQuery("");
+    commitQuery("");
     setOpen(false);
+  }
+
+  /** Turn the half-typed `key:value` into a committed chip. */
+  function applySuggestion(s: ScopeSuggestion) {
+    if (!trail) return;
+    setScope({
+      ...scope,
+      [s.key]: s.value,
+      text: scope.text.slice(0, trail.start).trim(),
+    });
+    inputRef.current?.focus();
+  }
+
+  function commitActive() {
+    if (active < suggestions.length) {
+      applySuggestion(suggestions[active]);
+      return;
+    }
+    const hit = hits[active - suggestions.length];
+    if (hit) select(hit);
   }
 
   function removeChip(key: "from" | "in" | "folder") {
@@ -127,25 +191,42 @@ export function GlobalSearch({
             onFocusSearch?.();
           }}
           onKeyDown={(e) => {
+            const mod = e.ctrlKey || e.metaKey;
+            if (mod && e.key.toLowerCase() === "z") {
+              e.preventDefault();
+              if (e.shiftKey) redoQuery();
+              else undoQuery();
+              return;
+            }
+            if (mod && e.key.toLowerCase() === "y") {
+              e.preventDefault();
+              redoQuery();
+              return;
+            }
+            // Empty input + Backspace: expand the chip back to editable text
+            // (don't wipe the filter in one shot).
             if (e.key === "Backspace" && !scope.text && chips.length) {
               e.preventDefault();
-              const last = chips[chips.length - 1];
-              removeChip(last.key as "from" | "in" | "folder");
+              const next = uncommitLastChip(scope);
+              if (next) setScope(next);
               return;
             }
             if (e.key === "Escape") {
-              if (query) onQuery("");
+              if (query) commitQuery("");
               else setOpen(false);
               (e.target as HTMLInputElement).blur();
             } else if (e.key === "ArrowDown") {
               e.preventDefault();
-              setActive((i) => Math.min(i + 1, Math.max(hits.length - 1, 0)));
+              setActive((i) => Math.min(i + 1, Math.max(total - 1, 0)));
             } else if (e.key === "ArrowUp") {
               e.preventDefault();
               setActive((i) => Math.max(i - 1, 0));
-            } else if (e.key === "Enter" && hits[active]) {
+            } else if (e.key === "Tab" && suggestions.length) {
               e.preventDefault();
-              select(hits[active]);
+              applySuggestion(suggestions[Math.min(active, suggestions.length - 1)]);
+            } else if (e.key === "Enter" && total > 0) {
+              e.preventDefault();
+              commitActive();
             }
           }}
         />
@@ -154,7 +235,7 @@ export function GlobalSearch({
             type="button"
             className="global-search-clear"
             aria-label="Clear search"
-            onClick={() => onQuery("")}
+            onClick={() => commitQuery("")}
           >
             <X {...Ism} />
           </button>
@@ -164,10 +245,44 @@ export function GlobalSearch({
       {showPalette && (
         <div className="search-palette" role="listbox">
           {loading && <div className="search-palette-hint">Indexing…</div>}
-          {!loading && hits.length === 0 && (
+          {!loading && total === 0 && (
             <div className="search-palette-hint">
               No matches. Try <code>in:Default</code> then space,{" "}
               <code>folder:Auth</code>, or <code>from:Personal</code>
+            </div>
+          )}
+          {!loading && suggestions.length > 0 && (
+            <div className="search-group">
+              <div className="search-group-label">
+                {trail?.key === "from"
+                  ? "Workspaces"
+                  : trail?.key === "folder"
+                    ? "Folders"
+                    : "Collections"}
+              </div>
+              {suggestions.map((s, i) => (
+                <button
+                  key={`${s.key}-${s.value}`}
+                  type="button"
+                  role="option"
+                  aria-selected={i === active}
+                  className={`search-hit search-scope-hit ${i === active ? "active" : ""}`}
+                  onMouseEnter={() => setActive(i)}
+                  onClick={() => applySuggestion(s)}
+                >
+                  <span className="search-kind scope">{s.key}:</span>
+                  <span className="search-hit-main">
+                    <span className="search-hit-title">
+                      {highlightMatch(s.value, trail?.value ?? "")}
+                    </span>
+                    <span className="search-hit-path">
+                      {s.key === trail?.key
+                        ? "Enter or Tab to scope"
+                        : `Not a ${trail?.key} — scope by ${s.key} instead`}
+                    </span>
+                  </span>
+                </button>
+              ))}
             </div>
           )}
           {!loading &&
@@ -175,7 +290,7 @@ export function GlobalSearch({
               <div key={label} className="search-group">
                 <div className="search-group-label">{label}</div>
                 {rows.map((item) => {
-                  const idx = hits.indexOf(item);
+                  const idx = suggestions.length + hits.indexOf(item);
                   return (
                     <button
                       key={`${item.kind}-${item.id}`}
@@ -213,7 +328,13 @@ export function GlobalSearch({
             ))}
           <div className="search-palette-foot">
             <span>
-              <kbd>↑↓</kbd> navigate <kbd>↵</kbd> open <kbd>esc</kbd> close
+              <kbd>↑↓</kbd> navigate{" "}
+              {suggestions.length > 0 && (
+                <>
+                  <kbd>tab</kbd> scope{" "}
+                </>
+              )}
+              <kbd>↵</kbd> open <kbd>esc</kbd> close
             </span>
             <span className="search-palette-scopes">
               <code>in:</code> <code>folder:</code> <code>from:</code>

@@ -9,7 +9,7 @@
     "build:mcp": "npm --prefix mcp install && npm --prefix mcp run build && mkdir -p src-tauri/resources/mcp && cp mcp/dist/stdio.mjs src-tauri/resources/mcp/stdio.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
-    "check": "cargo test -p inpost-core && npx --yes tsx src/searchQuery.ts && npx --yes tsx src/shortcuts.ts && npx --yes tsx src/workspaceSession.ts && npx --yes tsx src/envVar.ts && npx --yes tsx src/envSync.ts"
+    "check": "cargo test -p inpost-core && npx --yes tsx src/searchQuery.ts && npx --yes tsx src/shortcuts.ts && npx --yes tsx src/workspaceSession.ts && npx --yes tsx src/envVar.ts && npx --yes tsx src/envSync.ts && npx --yes tsx src/reqMeta.ts && npx --yes tsx src/mdEdit.ts"
   },
   "dependencies": {
     "@codemirror/lang-json": "^6.0.2",
@@ -17,11 +17,13 @@
     "@tauri-apps/plugin-opener": "^2",
     "@uiw/react-codemirror": "^4.25.11",
     "lucide-react": "^1.26.0",
+    "markdown-it": "^14.3.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",
+    "@types/markdown-it": "^14.1.2",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",
