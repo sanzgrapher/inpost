@@ -32,12 +32,12 @@ Before pushing, run the full release pipeline locally — the **same** gate sequ
 ./scripts/preflight.sh        # = npm run preflight + artifact summary
 ```
 
-This runs `build:mcp → tsc --noEmit → cargo test + tsx self-checks → vite build → cargo build --release → tauri build`, then lists the installers under `src-tauri/target/release/bundle/`. Run it before every tag push.
+This runs `build:mcp → tsc --noEmit → cargo test + tsx self-checks → vite build → cargo build --release → tauri build`, then lists the **Linux** installers under `src-tauri/target/release/bundle/` (Tauri only produces installers for the OS it runs on — Windows `.msi`/`.exe` and macOS `.dmg`/`.app` are built in CI, see below).
 
 CI:
 
 - Push to `main` or any PR runs `.github/workflows/check.yml` (gates only, no bundling).
-- Tag a release with `git tag vX.Y.Z && git push --tags` — `.github/workflows/release.yml` builds Linux + Windows + macOS installers in parallel and attaches them to the GitHub Release. (Unsigned — code-signing/notarization is a follow-up.)
+- Tag a release with `git tag vX.Y.Z && git push --tags` — `.github/workflows/release.yml` uses `tauri-apps/tauri-action@v0` to build Linux + Windows + macOS (Intel + arm64) installers in parallel and attaches them to the GitHub Release. (Unsigned — code-signing/notarization is a follow-up.)
 
 ## MCP (Phase 1)
 
