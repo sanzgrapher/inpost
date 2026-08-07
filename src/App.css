@@ -4114,6 +4114,15 @@ body.sash-dragging .sidebar {
   background: #d8d9dd;
 }
 
+.settings-action.danger {
+  background: color-mix(in srgb, var(--delete) 12%, #fff);
+  color: var(--delete);
+}
+
+.settings-action.danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--delete) 20%, #fff);
+}
+
 .settings-action:disabled {
   opacity: 0.45;
   cursor: default;

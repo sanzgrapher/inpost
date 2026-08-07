@@ -36,6 +36,11 @@ fn rename_workspace(
 }
 
 #[tauri::command]
+fn delete_workspace(state: tauri::State<'_, Arc<Db>>, id: String) -> Result<(), String> {
+    state.delete_workspace(&id)
+}
+
+#[tauri::command]
 fn list_collections(
     state: tauri::State<'_, Arc<Db>>,
     workspace_id: Option<String>,
@@ -443,6 +448,7 @@ pub fn run() {
             list_workspaces,
             create_workspace,
             rename_workspace,
+            delete_workspace,
             list_collections,
             create_collection,
             rename_collection,

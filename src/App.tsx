@@ -66,6 +66,7 @@ import {
   loadWorkspaceSession,
   saveLayoutDock,
   saveWorkspaceSession,
+  deleteWorkspaceSession,
   type LayoutDock,
   type Rail,
   type WorkspaceSession,
@@ -1328,6 +1329,7 @@ function SettingsView({
   workspaceId,
   onRenameWorkspace,
   onSwitchWorkspace,
+  onDeleteWorkspace,
 }: {
   section: SettingsSection;
   onSection: (s: SettingsSection) => void;
@@ -1341,6 +1343,7 @@ function SettingsView({
   workspaceId: string;
   onRenameWorkspace: (ws: Workspace) => void;
   onSwitchWorkspace: (id: string) => void;
+  onDeleteWorkspace: (ws: Workspace) => void;
 }) {
   const [stdioPath, setStdioPath] = useState<string | null>(null);
   const [copied, setCopied] = useState<"path" | "json" | "url" | "wsid" | null>(
@@ -1776,6 +1779,30 @@ function SettingsView({
                         onClick={() => onSwitchWorkspace(selectedWs.id)}
                       >
                         {selectedWs.id === workspaceId ? "Active" : "Switch"}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <h3 className="settings-group">Danger zone</h3>
+                <div className="settings-stack">
+                  <div className="settings-card">
+                    <div className="settings-item">
+                      <div className="settings-item-text">
+                        <div className="settings-item-title">Delete workspace</div>
+                        <div className="settings-item-desc">
+                          {workspaces.length <= 1
+                            ? "Create another workspace before deleting this one. At least one workspace must remain."
+                            : "Permanently removes this workspace and all of its collections, folders, requests, and history."}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        className="settings-action danger"
+                        disabled={workspaces.length <= 1}
+                        onClick={() => onDeleteWorkspace(selectedWs)}
+                      >
+                        Delete
                       </button>
                     </div>
                   </div>
@@ -3345,6 +3372,44 @@ function App() {
         name: name.trim(),
       });
       await refreshWorkspaces();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function removeWorkspace(ws: Workspace) {
+    if (workspaces.length <= 1) return;
+    const ok = await dialogs.confirm({
+      title: "Delete workspace?",
+      message: `Delete “${ws.name}” and all of its collections, folders, requests, and history? This cannot be undone.`,
+      confirmLabel: "Delete",
+      danger: true,
+    });
+    if (!ok) return;
+    const remaining = workspaces.filter((w) => w.id !== ws.id);
+    const next = remaining[0];
+    if (!next) return;
+    try {
+      await invoke("delete_workspace", { id: ws.id });
+      deleteWorkspaceSession(ws.id);
+      await refreshWorkspaces();
+      if (ws.id === workspaceId) {
+        setWorkspaceId(next.id);
+        saveWorkspaceId(next.id);
+        const saved = loadWorkspaceSession(next.id) ?? emptySession(layoutDock);
+        const tabs = saved.openTabs.includes(SETTINGS_ID)
+          ? saved.openTabs
+          : [...saved.openTabs, SETTINGS_ID];
+        applyWorkspaceSession({
+          ...saved,
+          openTabs: tabs,
+          selectedId: SETTINGS_ID,
+          settingsSection: "general",
+          envViewId: null,
+        });
+      } else {
+        setSettingsSection("general");
+      }
     } catch (e) {
       setError(String(e));
     }
@@ -5026,6 +5091,7 @@ function App() {
               workspaceId={workspaceId}
               onRenameWorkspace={(ws) => void renameWorkspace(ws)}
               onSwitchWorkspace={switchWorkspaceFromSettings}
+              onDeleteWorkspace={(ws) => void removeWorkspace(ws)}
             />
           ) : parseColdocTab(selectedId) ? (
             <CollectionDocView

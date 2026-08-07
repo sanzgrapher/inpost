@@ -570,6 +570,58 @@ impl Db {
         })
     }
 
+    /// Deletes a workspace and its collections / folders / requests / history.
+    /// Refuses when it would leave zero workspaces.
+    pub fn delete_workspace(&self, id: &str) -> Result<(), String> {
+        let conn = self.0.lock().map_err(|e| e.to_string())?;
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM workspaces", [], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        if count <= 1 {
+            return Err("cannot delete the last workspace".into());
+        }
+        let exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM workspaces WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if !exists {
+            return Err("workspace not found".into());
+        }
+        // FK cascade is not enabled; clean children explicitly.
+        conn.execute(
+            "DELETE FROM requests WHERE collection_id IN \
+             (SELECT id FROM collections WHERE workspace_id = ?1)",
+            params![id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM folders WHERE collection_id IN \
+             (SELECT id FROM collections WHERE workspace_id = ?1)",
+            params![id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM collections WHERE workspace_id = ?1",
+            params![id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM request_history WHERE workspace_id = ?1",
+            params![id],
+        )
+        .map_err(|e| e.to_string())?;
+        let n = conn
+            .execute("DELETE FROM workspaces WHERE id = ?1", params![id])
+            .map_err(|e| e.to_string())?;
+        if n == 0 {
+            return Err("workspace not found".into());
+        }
+        Ok(())
+    }
+
     pub fn list_collections(&self, workspace_id: Option<String>) -> Result<Vec<Collection>, String> {
         let conn = self.0.lock().map_err(|e| e.to_string())?;
         let sql = if workspace_id.is_some() {
@@ -1272,5 +1324,76 @@ impl Db {
         )
         .map_err(|e| e.to_string())?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mem_db() -> Db {
+        let conn = Connection::open_in_memory().expect("mem");
+        migrate(&conn).expect("migrate");
+        Db(Mutex::new(conn))
+    }
+
+    #[test]
+    fn delete_workspace_cascades_and_keeps_one() {
+        let db = mem_db();
+        let ws1 = db.list_workspaces().unwrap()[0].id.clone();
+        let ws2 = db.create_workspace("Scratch".into()).unwrap();
+        let col = db
+            .create_collection("C".into(), ws2.id.clone())
+            .unwrap();
+        let folder = db
+            .create_folder(col.id.clone(), None, "F".into())
+            .unwrap();
+        db.upsert_request(HttpRequest {
+            id: Uuid::new_v4().to_string(),
+            collection_id: col.id.clone(),
+            folder_id: Some(folder.id.clone()),
+            name: "R".into(),
+            description: String::new(),
+            method: "GET".into(),
+            url: "https://example.com".into(),
+            headers_json: "[]".into(),
+            body: String::new(),
+            body_type: "none".into(),
+            body_pairs_json: "[]".into(),
+            auth_type: "none".into(),
+            auth_json: "{}".into(),
+            path_vars_json: "{}".into(),
+            sort_order: 0,
+        })
+        .unwrap();
+        db.insert_history(HistoryEntry {
+            id: Uuid::new_v4().to_string(),
+            workspace_id: ws2.id.clone(),
+            request_id: None,
+            method: "GET".into(),
+            url: "https://example.com".into(),
+            status: Some(200),
+            status_text: Some("OK".into()),
+            elapsed_ms: Some(1),
+            size_bytes: Some(0),
+            error: None,
+            body: None,
+            body_pretty: None,
+            headers_json: None,
+            created_at: 1,
+        })
+        .unwrap();
+
+        db.delete_workspace(&ws2.id).unwrap();
+        assert_eq!(db.list_workspaces().unwrap().len(), 1);
+        assert!(db.list_collections(Some(ws2.id.clone())).unwrap().is_empty());
+        assert!(db
+            .list_workspace_history(ws2.id.clone(), 10)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            db.delete_workspace(&ws1).unwrap_err(),
+            "cannot delete the last workspace"
+        );
     }
 }

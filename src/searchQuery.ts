@@ -37,7 +37,12 @@ export function parseSearchQuery(raw: string): SearchScope {
     setKey(scope, m[1].toLowerCase() as ScopeKey, (m[2] ?? m[3] ?? "").trim());
     text = text.replace(m[0], " ");
   }
+  // Keep a trailing space so the controlled input can type "Get Species"
+  // (and so `in:Default ` still reaches COMMITTED_RE on the next round-trip).
+  // Whitespace-only remainder (chip-only query) stays empty.
+  const keepTrail = /\s$/.test(text);
   scope.text = text.replace(/\s+/g, " ").trim();
+  if (keepTrail && scope.text) scope.text += " ";
   return scope;
 }
 
@@ -85,7 +90,9 @@ export function serializeSearchQuery(scope: SearchScope): string {
   if (scope.from) chips.push(`from:${quoteScopeValue(scope.from)}`);
   if (scope.in) chips.push(`in:${quoteScopeValue(scope.in)}`);
   if (scope.folder) chips.push(`folder:${quoteScopeValue(scope.folder)}`);
-  const text = scope.text.trim();
+  // Don't trim: trailing space is how free text grows ("Get ") and how
+  // half-typed scopes commit (`in:Default `).
+  const text = scope.text;
   if (chips.length === 0) return text;
   // Trailing space keeps chips committed on the next parse.
   return text ? `${chips.join(" ")} ${text}` : `${chips.join(" ")} `;
@@ -275,6 +282,19 @@ if (typeof process !== "undefined" && process.argv[1]?.includes("searchQuery")) 
 
   const chipOnly = parseSearchQuery(serializeSearchQuery({ in: "default", text: "" }));
   console.assert(chipOnly.in === "default" && chipOnly.text === "", "chip-only roundtrip");
+
+  // Trailing space must survive so the controlled input can type multi-word queries.
+  const trailSpace = parseSearchQuery("Get ");
+  console.assert(trailSpace.text === "Get ", `trailing free-text space got "${trailSpace.text}"`);
+  const multi = parseSearchQuery(serializeSearchQuery({ text: "Get Species" }));
+  console.assert(multi.text === "Get Species", `multi-word roundtrip got "${multi.text}"`);
+  const spaceCommit = parseSearchQuery("in:Default ");
+  console.assert(
+    spaceCommit.in === "Default" && spaceCommit.text === "",
+    `space commits chip, got in=${spaceCommit.in} text="${spaceCommit.text}"`,
+  );
+  const typedSpace = parseSearchQuery(serializeSearchQuery({ text: "Get " }));
+  console.assert(typedSpace.text === "Get ", `serialize keeps trailing space: "${typedSpace.text}"`);
 
   const un = uncommitLastChip({ in: "Default", folder: "Auth", text: "login" });
   console.assert(un?.folder === undefined && un?.in === "Default", "uncommit drops last chip");

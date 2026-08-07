@@ -2,7 +2,7 @@
 
 **Purpose:** Living log so any new chat stays on track. Agents **read this first**, then **append** after each user request they work on.
 
-**Last updated:** 2026-07-25 (v0.1.0 re-released with stdio.mjs install fix)
+**Last updated:** 2026-08-07 (global search spaces)
 
 ---
 
@@ -53,10 +53,31 @@
 - Request dirty dot on tabs; rename via breadcrumb (URL-bar name field removed)  
 - Shortcut table (`src/shortcuts.ts`) drives handler + Settings → Keyboard + empty-response hints  
 - Request body types (none/JSON/text/urlencoded/multipart) + Auth (Bearer/Basic/API key) + path params + header autocomplete + response History tab  
+- Workspace settings: rename / switch / **delete** (confirm dialog; refuses last workspace)
 
 ---
 
 ## Trace log (newest first)
+
+### 2026-08-07 — Fix global search bar spaces
+**User asked:** Titlebar search strips spaces (`Get Species` → `GetSpecies`); check other search UIs aren't damaged.
+**Did:** Root cause was controlled-input round-trip through `parseSearchQuery` / `serializeSearchQuery` both `.trim()`-ing free text. Preserved trailing free-text spaces in [`src/searchQuery.ts`](../src/searchQuery.ts) so multi-word typing and `in:Default ` chip-commit work; matching still trims at `filterIndex`. Added self-check asserts. Other search UIs (workspace picker, sidebar filter, tab search) untouched — they never used this path.
+**Needs next:** Phase 3 sync spike remains next feature.
+
+### 2026-08-05 — Dev: port 1420 already in use
+**User asked:** Terminal error `Port 1420 is already in use` when running `npm run tauri dev`.
+**Did:** Stale first `npm run tauri dev` (vite on :1420 + tauri/inpost PIDs) still running; second launch failed on `beforeDevCommand`. Killed old processes; port 1420 freed.
+**Needs next:** Re-run `npm run tauri dev` in one terminal only; Ctrl+C to stop before restarting.
+
+### 2026-08-05 — Workspace delete in settings
+**User asked:** Workspace settings had no delete option — add delete with confirmation dialog.
+**Did:** Confirmed gap (settings Identity/Switch only; no `delete_workspace` in Rust). Added cascade delete in `src-tauri/src/db.rs` (collections → folders/requests + history; refuses last workspace) + unit test; Tauri command `delete_workspace`; Settings → workspace → **Danger zone** Delete button using existing `dialogs.confirm` (danger); clears `workspaceSession`, switches away if active was deleted. CSS `.settings-action.danger`.
+**Needs next:** Optional MCP `delete_workspace` tool (not requested). Phase 3 sync spike remains next feature.
+
+### 2026-07-25 — Research: how OSS API clients ship signed installers
+**User asked:** How do open-source providers (Yaak, Bruno, Requestly, etc.) build/release for Mac + Windows so users don't get warnings/blocks?
+**Did:** Research only. Surveyed comps: **Yaak** (MIT, Tauri/Rust/React — closest comp; single dev bought Apple Developer ID + Windows cert, signs/notarizes via `tauri-action` env vars), **Bruno** (MIT, Electron + `electron-builder` + `notarize.js` afterSign hook; now VC-funded), **Insomnia** (Apache, Kong-owned), **Postman** (closed, signed), **Hoppscotch** (MIT desktop wrapper unsigned — PWA-first), **Requestly** desktop (closed; MCP SDK MIT). Common Tauri pattern: `tauri-action` does macOS sign+notarize+staple automatically when `APPLE_CERTIFICATE`/`APPLE_CERTIFICATE_PASSWORD`/`APPLE_SIGNING_IDENTITY`/`APPLE_ID`/`APPLE_PASSWORD`/`APPLE_TEAM_ID` env vars are present, preceded by a step that imports the base64 `.p12` into a throwaway keychain (`security create-keychain` → `import` → `set-keychain-settings -t 3600` to dodge the lock-during-codesign bug, tauri-action issue #941). Windows: `tauri.conf.json` `bundle.windows.signCommand` invoking `relic`/`signtool`, or Azure Key Vault / Microsoft Trusted Signing with `AZURE_CLIENT_ID`/`SECRET`/`TENANT_ID`. Bruno hardcodes the signing identity + teamID in `electron-builder-config.js` + `notarize.js`. macOS 15 even killed the right-click → Open bypass, so unsigned now blocks harder than before.
+**Needs next:** Decision: (a) buy certs and wire signing into `release.yml`, (b) keep unsigned but ship per-OS bypass instructions in README + release notes, (c) defer until commercial traction. Cost rough: Apple $99/yr, Windows EV ~$200–400/yr. Pre-existing backlog entry `docs/TRACE.md:35` covers the same item — no code change this round.
 
 ### 2026-07-25 — v0.1.0 re-tagged & re-released with the stdio.mjs install fix
 **User asked:** "proceed pusha and run builds with release aand release notes fix xyz" — push the stdio.mjs install fix, re-cut v0.1.0 with it, run the release matrix, write proper release notes.
