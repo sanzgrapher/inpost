@@ -9,7 +9,7 @@
     "build:mcp": "node scripts/build-mcp.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
-    "check": "cargo test -p inpost-core && npx --yes tsx src/searchQuery.ts && npx --yes tsx src/shortcuts.ts && npx --yes tsx src/workspaceSession.ts && npx --yes tsx src/envVar.ts && npx --yes tsx src/envSync.ts && npx --yes tsx src/reqMeta.ts && npx --yes tsx src/mdEdit.ts",
+    "check": "cargo test -p inpost-core && npx --yes tsx src/searchQuery.ts && npx --yes tsx src/shortcuts.ts && npx --yes tsx src/workspaceSession.ts && npx --yes tsx src/envVar.ts && npx --yes tsx src/envSync.ts && npx --yes tsx src/reqMeta.ts && npx --yes tsx src/mdEdit.ts && npx --yes tsx src/tabClose.ts",
     "ci:gates": "npm run build:mcp && tsc --noEmit && npm run check && vite build && cargo build --release -p inpost",
     "preflight": "npm run ci:gates && npm run tauri build",
     "release:local": "bash scripts/preflight.sh"

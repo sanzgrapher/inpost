@@ -404,9 +404,17 @@ type ConfirmOpts = {
   danger?: boolean;
 };
 
+type UnsavedOpts = {
+  title?: string;
+  message: string;
+};
+
+export type UnsavedChoice = "save" | "discard" | "cancel";
+
 type DialogApi = {
   prompt: (opts: PromptOpts) => Promise<string | null>;
   confirm: (opts: ConfirmOpts) => Promise<boolean>;
+  unsaved: (opts: UnsavedOpts) => Promise<UnsavedChoice>;
 };
 
 const DialogContext = createContext<DialogApi | null>(null);
@@ -422,6 +430,11 @@ type DialogState =
       kind: "confirm";
       opts: ConfirmOpts;
       resolve: (v: boolean) => void;
+    }
+  | {
+      kind: "unsaved";
+      opts: UnsavedOpts;
+      resolve: (v: UnsavedChoice) => void;
     }
   | null;
 
@@ -445,7 +458,16 @@ export function DialogProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
-  const api = useMemo(() => ({ prompt, confirm }), [prompt, confirm]);
+  const unsaved = useCallback((opts: UnsavedOpts) => {
+    return new Promise<UnsavedChoice>((resolve) => {
+      setDialog({ kind: "unsaved", opts, resolve });
+    });
+  }, []);
+
+  const api = useMemo(
+    () => ({ prompt, confirm, unsaved }),
+    [prompt, confirm, unsaved],
+  );
 
   function closePrompt(result: string | null) {
     if (dialog?.kind !== "prompt") return;
@@ -455,6 +477,12 @@ export function DialogProvider({ children }: { children: ReactNode }) {
 
   function closeConfirm(result: boolean) {
     if (dialog?.kind !== "confirm") return;
+    dialog.resolve(result);
+    setDialog(null);
+  }
+
+  function closeUnsaved(result: UnsavedChoice) {
+    if (dialog?.kind !== "unsaved") return;
     dialog.resolve(result);
     setDialog(null);
   }
@@ -515,6 +543,32 @@ export function DialogProvider({ children }: { children: ReactNode }) {
                 autoFocus
               >
                 {dialog.opts.confirmLabel ?? "Confirm"}
+              </Button>
+            </>
+          }
+        >
+          <p className="ui-modal-message">{dialog.opts.message}</p>
+        </Modal>
+      )}
+      {dialog?.kind === "unsaved" && (
+        <Modal
+          open
+          title={dialog.opts.title ?? "Unsaved changes"}
+          onClose={() => closeUnsaved("cancel")}
+          footer={
+            <>
+              <Button variant="ghost" onClick={() => closeUnsaved("discard")}>
+                Don&apos;t save
+              </Button>
+              <Button variant="ghost" onClick={() => closeUnsaved("cancel")}>
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                onClick={() => closeUnsaved("save")}
+                autoFocus
+              >
+                Save
               </Button>
             </>
           }

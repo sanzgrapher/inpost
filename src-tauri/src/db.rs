@@ -116,6 +116,9 @@ pub struct HistoryEntry {
     pub body_pretty: Option<String>,
     #[serde(default)]
     pub headers_json: Option<String>,
+    /// Snapshot of the request that produced this response (headers/body/auth/…).
+    #[serde(default)]
+    pub request_json: Option<String>,
     pub created_at: i64,
 }
 
@@ -377,6 +380,12 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     if !has_column(conn, "request_history", "headers_json")? {
         conn.execute_batch(
             "ALTER TABLE request_history ADD COLUMN headers_json TEXT;",
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    if !has_column(conn, "request_history", "request_json")? {
+        conn.execute_batch(
+            "ALTER TABLE request_history ADD COLUMN request_json TEXT;",
         )
         .map_err(|e| e.to_string())?;
     }
@@ -1216,11 +1225,22 @@ impl Db {
                 b.push_str("\n…[truncated]");
             }
         }
+        if let Some(ref mut snap) = entry.request_json {
+            if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(snap) {
+                if let Some(serde_json::Value::String(b)) = v.get_mut("body") {
+                    if b.len() > MAX {
+                        b.truncate(MAX);
+                        b.push_str("\n…[truncated]");
+                        *snap = v.to_string();
+                    }
+                }
+            }
+        }
         conn.execute(
             "INSERT INTO request_history
              (id, workspace_id, request_id, method, url, status, status_text,
-              elapsed_ms, size_bytes, error, body, body_pretty, created_at, headers_json)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+              elapsed_ms, size_bytes, error, body, body_pretty, created_at, headers_json, request_json)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
             params![
                 entry.id,
                 entry.workspace_id,
@@ -1236,6 +1256,7 @@ impl Db {
                 entry.body_pretty,
                 entry.created_at,
                 entry.headers_json,
+                entry.request_json,
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -1258,7 +1279,24 @@ impl Db {
             body_pretty: r.get(11)?,
             created_at: r.get(12)?,
             headers_json: r.get(13)?,
+            request_json: r.get(14)?,
         })
+    }
+
+    const HISTORY_COLS: &'static str = "id, workspace_id, request_id, method, url, status, status_text,
+                        elapsed_ms, size_bytes, error, body, body_pretty, created_at, headers_json, request_json";
+
+    pub fn get_history(&self, id: &str) -> Result<Option<HistoryEntry>, String> {
+        let conn = self.0.lock().map_err(|e| e.to_string())?;
+        let sql = format!(
+            "SELECT {} FROM request_history WHERE id = ?1",
+            Self::HISTORY_COLS.replace('\n', " ")
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let mut rows = stmt
+            .query_map(params![id], Self::map_history)
+            .map_err(|e| e.to_string())?;
+        rows.next().transpose().map_err(|e| e.to_string())
     }
 
     pub fn list_workspace_history(
@@ -1268,16 +1306,11 @@ impl Db {
     ) -> Result<Vec<HistoryEntry>, String> {
         let conn = self.0.lock().map_err(|e| e.to_string())?;
         let lim = limit.clamp(1, 200);
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, workspace_id, request_id, method, url, status, status_text,
-                        elapsed_ms, size_bytes, error, body, body_pretty, created_at, headers_json
-                 FROM request_history
-                 WHERE workspace_id = ?1
-                 ORDER BY created_at DESC
-                 LIMIT ?2",
-            )
-            .map_err(|e| e.to_string())?;
+        let sql = format!(
+            "SELECT {} FROM request_history WHERE workspace_id = ?1 ORDER BY created_at DESC LIMIT ?2",
+            Self::HISTORY_COLS.replace('\n', " ")
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map(params![workspace_id, lim], Self::map_history)
             .map_err(|e| e.to_string())?;
@@ -1292,16 +1325,11 @@ impl Db {
     ) -> Result<Vec<HistoryEntry>, String> {
         let conn = self.0.lock().map_err(|e| e.to_string())?;
         let lim = limit.clamp(1, 100);
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, workspace_id, request_id, method, url, status, status_text,
-                        elapsed_ms, size_bytes, error, body, body_pretty, created_at, headers_json
-                 FROM request_history
-                 WHERE request_id = ?1
-                 ORDER BY created_at DESC
-                 LIMIT ?2",
-            )
-            .map_err(|e| e.to_string())?;
+        let sql = format!(
+            "SELECT {} FROM request_history WHERE request_id = ?1 ORDER BY created_at DESC LIMIT ?2",
+            Self::HISTORY_COLS.replace('\n', " ")
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map(params![request_id, lim], Self::map_history)
             .map_err(|e| e.to_string())?;
@@ -1321,6 +1349,16 @@ impl Db {
         conn.execute(
             "DELETE FROM request_history WHERE request_id = ?1",
             params![request_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn clear_workspace_history(&self, workspace_id: &str) -> Result<(), String> {
+        let conn = self.0.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM request_history WHERE workspace_id = ?1",
+            params![workspace_id],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
@@ -1380,6 +1418,7 @@ mod tests {
             body: None,
             body_pretty: None,
             headers_json: None,
+            request_json: None,
             created_at: 1,
         })
         .unwrap();
@@ -1395,5 +1434,38 @@ mod tests {
             db.delete_workspace(&ws1).unwrap_err(),
             "cannot delete the last workspace"
         );
+    }
+
+    fn hist(workspace_id: String, created_at: i64) -> HistoryEntry {
+        HistoryEntry {
+            id: Uuid::new_v4().to_string(),
+            workspace_id,
+            request_id: None,
+            method: "GET".into(),
+            url: "https://example.com".into(),
+            status: Some(200),
+            status_text: Some("OK".into()),
+            elapsed_ms: Some(1),
+            size_bytes: Some(0),
+            error: None,
+            body: None,
+            body_pretty: None,
+            headers_json: None,
+            request_json: None,
+            created_at,
+        }
+    }
+
+    #[test]
+    fn clear_workspace_history_only_that_workspace() {
+        let db = mem_db();
+        let ws1 = db.list_workspaces().unwrap()[0].id.clone();
+        let ws2 = db.create_workspace("Other".into()).unwrap().id;
+        db.insert_history(hist(ws1.clone(), 1)).unwrap();
+        db.insert_history(hist(ws1.clone(), 2)).unwrap();
+        db.insert_history(hist(ws2.clone(), 3)).unwrap();
+        db.clear_workspace_history(&ws1).unwrap();
+        assert!(db.list_workspace_history(ws1, 10).unwrap().is_empty());
+        assert_eq!(db.list_workspace_history(ws2, 10).unwrap().len(), 1);
     }
 }

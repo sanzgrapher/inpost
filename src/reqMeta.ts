@@ -147,6 +147,11 @@ declare const process: { argv: string[] } | undefined;
 if (typeof process !== "undefined" && process.argv[1]?.includes("reqMeta")) {
   console.assert(pathVarNames("{{baseUrl}}/users/{id}/:slug").join() === "id,slug");
   console.assert(pathVarNames("https://x/{a}/{a}").join() === "a");
+  // Imports often store pathVars as `{}`; UI still derives placeholders from the URL.
+  console.assert(
+    pathVarNames("{{baseUrl}}/pokemon-species/{species}").join() === "species",
+    "species path placeholder",
+  );
   const h = syncContentType(
     [{ key: "Accept", value: "application/json", enabled: true }],
     "json",

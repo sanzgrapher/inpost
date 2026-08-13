@@ -12,7 +12,10 @@ export type ShortcutAction =
   | "dockRight"
   | "cycleEnv"
   | "cycleTab"
-  | "cycleTabPrev";
+  | "cycleTabPrev"
+  | "closeTab"
+  | "closeAllTabs"
+  | "reopenTab";
 
 export type Shortcut = {
   action: ShortcutAction;
@@ -60,6 +63,19 @@ export const SHORTCUTS: Shortcut[] = [
     keys: ["Ctrl", "Shift", "Tab"],
     label: "Previous open tab",
     note: "Also Ctrl+PageUp — use if Ctrl+Shift+Tab is eaten by the OS/webview.",
+  },
+  { action: "closeTab", keys: ["Ctrl", "W"], label: "Close tab" },
+  {
+    action: "closeAllTabs",
+    keys: ["Ctrl", "Shift", "W"],
+    label: "Close all tabs",
+    note: "Asks first. Reopen with Ctrl+Shift+T.",
+  },
+  {
+    action: "reopenTab",
+    keys: ["Ctrl", "Shift", "T"],
+    label: "Reopen closed tab",
+    note: "Last closed first; repeat to walk the stack.",
   },
 ];
 
@@ -117,6 +133,9 @@ export function matchShortcut(e: KeyEventLike): ShortcutAction | null {
   }
   if (mod) {
     if (shift && key === "a") return "searchTabs";
+    if (shift && key === "w") return "closeAllTabs";
+    if (shift && key === "t") return "reopenTab";
+    if (key === "w") return "closeTab";
     if (key === "enter") return "send";
     if (key === "s") return "save";
     if (key === "l") return "focusUrl";
@@ -206,6 +225,19 @@ if (typeof process !== "undefined" && process.argv[1]?.includes("shortcuts")) {
   console.assert(
     matchShortcut(key("a", { ctrlKey: true, shiftKey: true })) === "searchTabs",
     "ctrl+shift+a searches tabs",
+  );
+  console.assert(
+    matchShortcut(key("w", { ctrlKey: true })) === "closeTab",
+    "ctrl+w closes tab",
+  );
+  console.assert(
+    matchShortcut(key("w", { ctrlKey: true, shiftKey: true })) ===
+      "closeAllTabs",
+    "ctrl+shift+w closes all",
+  );
+  console.assert(
+    matchShortcut(key("t", { ctrlKey: true, shiftKey: true })) === "reopenTab",
+    "ctrl+shift+t reopens",
   );
 
   console.assert(isInspectKey(key("F12")), "f12 inspects");

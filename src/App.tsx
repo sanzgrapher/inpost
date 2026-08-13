@@ -29,17 +29,29 @@ import {
   Trash2,
   Upload,
   X,
+  ExternalLink,
 } from "lucide-react";
 import { CodeEditor } from "./CodeEditor";
 import { DocArticle } from "./Docs";
 import { GlobalSearch } from "./GlobalSearch";
+import { HistoryDetail } from "./HistoryDetail";
 import { methodClass, methodLabel } from "./methodStyle";
 import {
   type IndexItem,
 } from "./searchQuery";
 import { UrlField } from "./UrlField";
 import { VarField, type EnvVarHoverProps } from "./EnvVarHover";
-import { SHORTCUTS, isInspectKey, matchShortcut, nextInCycle } from "./shortcuts";
+import { SHORTCUTS, isInspectKey, matchShortcut, nextInCycle, type ShortcutAction } from "./shortcuts";
+import {
+  entriesToClose,
+  idsToClose,
+  insertTab,
+  popClosed,
+  pushClosed,
+  tabCloseEnabled,
+  type ClosedTab,
+  type TabCloseAction,
+} from "./tabClose";
 import { Button, Modal, Select, SuggestInput, useDialogs } from "./ui";
 import {
   sourceKeys,
@@ -164,6 +176,7 @@ type HistoryEntry = {
   body?: string | null;
   bodyPretty?: string | null;
   headersJson?: string | null;
+  requestJson?: string | null;
   createdAt: number;
 };
 type ReqTab = "overview" | "params" | "headers" | "body" | "auth";
@@ -196,6 +209,11 @@ type McpLogEntry = {
 
 const WS_KEY = "inpost.workspaceId";
 const DEV_MODE_KEY = "inpost.devMode";
+const AUTO_SAVE_KEY = "inpost.autoSave";
+const AUTO_SAVE_DELAY_KEY = "inpost.autoSaveDelayMs";
+const AUTO_SAVE_DELAY_DEFAULT = 1000;
+const AUTO_SAVE_DELAY_MIN = 250;
+const AUTO_SAVE_DELAY_MAX = 60_000;
 /** Sentinel open-tab id — sits beside request tabs. */
 const SETTINGS_ID = "__settings__";
 /** Collection-docs tabs share the strip: `__coldoc__:<collectionId>`. */
@@ -203,6 +221,19 @@ const COLDOC_PREFIX = "__coldoc__:";
 const coldocTabId = (collectionId: string) => `${COLDOC_PREFIX}${collectionId}`;
 function parseColdocTab(id: string | null): string | null {
   return id?.startsWith(COLDOC_PREFIX) ? id.slice(COLDOC_PREFIX.length) : null;
+}
+/** History snapshot tabs: `__hist__:<entryId>`. */
+const HIST_PREFIX = "__hist__:";
+const histTabId = (entryId: string) => `${HIST_PREFIX}${entryId}`;
+function parseHistTab(id: string | null): string | null {
+  return id?.startsWith(HIST_PREFIX) ? id.slice(HIST_PREFIX.length) : null;
+}
+function isSpecialTab(id: string) {
+  return (
+    id === SETTINGS_ID ||
+    id.startsWith(COLDOC_PREFIX) ||
+    id.startsWith(HIST_PREFIX)
+  );
 }
 
 function mcpCursorConfig(stdioPath: string): string {
@@ -247,6 +278,51 @@ function loadDevMode(): boolean {
 function saveDevMode(on: boolean) {
   try {
     localStorage.setItem(DEV_MODE_KEY, on ? "1" : "0");
+  } catch {
+    /* ignore */
+  }
+}
+
+function loadAutoSave(): boolean {
+  try {
+    return localStorage.getItem(AUTO_SAVE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function saveAutoSave(on: boolean) {
+  try {
+    localStorage.setItem(AUTO_SAVE_KEY, on ? "1" : "0");
+  } catch {
+    /* ignore */
+  }
+}
+
+function clampAutoSaveDelay(ms: number): number {
+  if (!Number.isFinite(ms)) return AUTO_SAVE_DELAY_DEFAULT;
+  return Math.min(
+    AUTO_SAVE_DELAY_MAX,
+    Math.max(AUTO_SAVE_DELAY_MIN, Math.round(ms)),
+  );
+}
+
+function loadAutoSaveDelayMs(): number {
+  try {
+    const raw = localStorage.getItem(AUTO_SAVE_DELAY_KEY);
+    if (raw == null) return AUTO_SAVE_DELAY_DEFAULT;
+    return clampAutoSaveDelay(Number(raw));
+  } catch {
+    return AUTO_SAVE_DELAY_DEFAULT;
+  }
+}
+
+function saveAutoSaveDelayMs(ms: number) {
+  try {
+    localStorage.setItem(
+      AUTO_SAVE_DELAY_KEY,
+      String(clampAutoSaveDelay(ms)),
+    );
   } catch {
     /* ignore */
   }
@@ -460,20 +536,47 @@ function mergePathPairs(url: string, stored: Pair[]): Pair[] {
   });
 }
 
-function snapOf(r: HttpRequest): SavedSnap {
+/**
+ * Editor-equivalent snapshot: parse DB JSON the same way the UI does, then
+ * re-serialize. Raw DB fields false-dirty imports (e.g. pathVars `{}` vs
+ * `[["id",""]]` after mergePathPairs).
+ */
+function snapFromRequest(r: HttpRequest): {
+  snap: SavedSnap;
+  draft: HttpRequest;
+  headers: Pair[];
+  query: Pair[];
+  bodyPairs: Pair[];
+  pathPairs: Pair[];
+  urlBase: string;
+} {
   const n = normalizeRequest(r);
+  const headers = parsePairs(n.headersJson);
+  const bodyPairs = parsePairs(n.bodyPairsJson!);
+  const { base, query } = splitUrl(n.url);
+  const pathPairs = mergePathPairs(base, parsePairs(n.pathVarsJson!));
+  const url = joinUrl(base, query);
+  const draft = { ...n, url };
   return {
-    name: n.name,
-    description: n.description ?? "",
-    method: n.method,
-    url: n.url,
-    headersJson: n.headersJson,
-    body: n.body,
-    bodyType: n.bodyType!,
-    bodyPairsJson: n.bodyPairsJson!,
-    authType: n.authType!,
-    authJson: n.authJson!,
-    pathVarsJson: n.pathVarsJson!,
+    snap: {
+      name: draft.name,
+      description: draft.description ?? "",
+      method: draft.method,
+      url,
+      headersJson: pairsToJson(headers),
+      body: draft.body,
+      bodyType: draft.bodyType!,
+      bodyPairsJson: bodyPairsToJson(bodyPairs),
+      authType: draft.authType!,
+      authJson: draft.authJson!,
+      pathVarsJson: pairsToJson(pathPairs),
+    },
+    draft,
+    headers,
+    query,
+    bodyPairs,
+    pathPairs,
+    urlBase: base,
   };
 }
 
@@ -1321,6 +1424,10 @@ function SettingsView({
   onSection,
   layoutDock,
   onLayoutDock,
+  autoSave,
+  onAutoSave,
+  autoSaveDelayMs,
+  onAutoSaveDelayMs,
   devMode,
   onDevMode,
   mcpStatus,
@@ -1335,6 +1442,10 @@ function SettingsView({
   onSection: (s: SettingsSection) => void;
   layoutDock: LayoutDock;
   onLayoutDock: (d: LayoutDock) => void;
+  autoSave: boolean;
+  onAutoSave: (on: boolean) => void;
+  autoSaveDelayMs: number;
+  onAutoSaveDelayMs: (ms: number) => void;
   devMode: boolean;
   onDevMode: (on: boolean) => void;
   mcpStatus: McpStatus | null;
@@ -1507,6 +1618,69 @@ function SettingsView({
                       Bottom
                     </button>
                   </div>
+                </div>
+              </div>
+            </div>
+
+            <h3 className="settings-group">Save</h3>
+            <div className="settings-stack">
+              <div className="settings-card">
+                <div className="settings-item">
+                  <div className="settings-item-text">
+                    <div className="settings-item-title">Auto save</div>
+                    <div className="settings-item-desc">
+                      Automatically save the open request after you stop editing.
+                    </div>
+                  </div>
+                  <div
+                    className="settings-seg"
+                    role="group"
+                    aria-label="Auto save"
+                  >
+                    <button
+                      type="button"
+                      className={autoSave ? "" : "active"}
+                      onClick={() => onAutoSave(false)}
+                    >
+                      Off
+                    </button>
+                    <button
+                      type="button"
+                      className={autoSave ? "active" : ""}
+                      onClick={() => onAutoSave(true)}
+                    >
+                      On
+                    </button>
+                  </div>
+                </div>
+                <div className="settings-item">
+                  <div className="settings-item-text">
+                    <div className="settings-item-title">Save after delay</div>
+                    <div className="settings-item-desc">
+                      Wait this many milliseconds after the last change, then
+                      save ({AUTO_SAVE_DELAY_MIN}–{AUTO_SAVE_DELAY_MAX} ms).
+                    </div>
+                  </div>
+                  <input
+                    className="settings-num"
+                    type="number"
+                    min={AUTO_SAVE_DELAY_MIN}
+                    max={AUTO_SAVE_DELAY_MAX}
+                    step={50}
+                    disabled={!autoSave}
+                    value={autoSaveDelayMs}
+                    aria-label="Auto save delay in milliseconds"
+                    onChange={(e) => {
+                      const n = Number(e.target.value);
+                      if (!Number.isFinite(n)) return;
+                      onAutoSaveDelayMs(clampAutoSaveDelay(n));
+                    }}
+                    onBlur={(e) => {
+                      onAutoSaveDelayMs(
+                        clampAutoSaveDelay(Number(e.target.value)),
+                      );
+                    }}
+                  />
                 </div>
               </div>
             </div>
@@ -1907,6 +2081,9 @@ function App() {
   const [expandedFolders, setExpandedFolders] = useState<Record<string, boolean>>(
     () => bootSession.expandedFolders,
   );
+  const [expandedCollections, setExpandedCollections] = useState<
+    Record<string, boolean>
+  >(() => bootSession.expandedCollections);
   /** VS Code-style create target: folder → inside; request → sibling; collection → root. */
   const [treeAnchor, setTreeAnchor] = useState<
     | { kind: "folder" | "request" | "collection"; id: string }
@@ -1922,6 +2099,12 @@ function App() {
     top: number;
     left: number;
   } | null>(null);
+  const [tabMenu, setTabMenu] = useState<{
+    id: string;
+    top: number;
+    left: number;
+  } | null>(null);
+  const [closedTabs, setClosedTabs] = useState<ClosedTab[]>([]);
   const [envSync, setEnvSync] = useState<{
     sourceId: string;
     targetId: string;
@@ -1966,6 +2149,7 @@ function App() {
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [requestHistory, setRequestHistory] = useState<HistoryEntry[]>([]);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [histCache, setHistCache] = useState<Record<string, HistoryEntry>>({});
   const [viewingHistoryId, setViewingHistoryId] = useState<string | null>(null);
   const historyPopRef = useRef<HTMLDivElement>(null);
   const [layoutDock, setLayoutDock] = useState<LayoutDock>(
@@ -1991,6 +2175,8 @@ function App() {
   sidebarWidthRef.current = sidebarWidth;
   splitRatioRef.current = splitRatio;
   const [devMode, setDevMode] = useState(loadDevMode);
+  const [autoSave, setAutoSave] = useState(loadAutoSave);
+  const [autoSaveDelayMs, setAutoSaveDelayMs] = useState(loadAutoSaveDelayMs);
   const [narrowSplit, setNarrowSplit] = useState(() =>
     typeof window !== "undefined"
       ? window.matchMedia("(max-width: 1100px)").matches
@@ -2093,6 +2279,7 @@ function App() {
     responseHidden,
     rail,
     expandedFolders,
+    expandedCollections,
     settingsSection,
     envViewId,
     sidebarWidth,
@@ -2109,6 +2296,7 @@ function App() {
     setResponseHidden(session.responseHidden);
     setRail(session.rail);
     setExpandedFolders(session.expandedFolders);
+    setExpandedCollections(session.expandedCollections);
     setSettingsSection(asSettingsSection(session.settingsSection));
     setEnvViewId(session.envViewId);
     setSidebarWidth(session.sidebarWidth);
@@ -2126,6 +2314,8 @@ function App() {
     setHistoryOpen(false);
     setViewingHistoryId(null);
     setCrumbEditing(false);
+    setClosedTabs([]);
+    setTabMenu(null);
   }
 
   useEffect(() => {
@@ -2144,6 +2334,7 @@ function App() {
     responseHidden,
     rail,
     expandedFolders,
+    expandedCollections,
     settingsSection,
     envViewId,
     sidebarWidth,
@@ -2235,10 +2426,6 @@ function App() {
     );
   }, [workspaceId]);
 
-  function markSaved(r: HttpRequest) {
-    setSavedById((s) => ({ ...s, [r.id]: snapOf(r) }));
-  }
-
   function applyRequest(r: HttpRequest, cached?: {
     draft: HttpRequest;
     headers: Pair[];
@@ -2260,17 +2447,16 @@ function App() {
       setResult(cached.result);
       setError(cached.error);
     } else {
-      const n = normalizeRequest(r);
-      setDraft(n);
-      setHeaders(parsePairs(n.headersJson));
-      setBodyPairs(parsePairs(n.bodyPairsJson!));
-      const { base, query: q } = splitUrl(n.url);
-      setUrlBase(base);
-      setQuery(q);
-      setPathPairs(mergePathPairs(base, parsePairs(n.pathVarsJson!)));
+      const loaded = snapFromRequest(r);
+      setDraft(loaded.draft);
+      setHeaders(loaded.headers);
+      setBodyPairs(loaded.bodyPairs);
+      setUrlBase(loaded.urlBase);
+      setQuery(loaded.query);
+      setPathPairs(loaded.pathPairs);
       setResult(null);
       setError(null);
-      markSaved(n);
+      setSavedById((s) => ({ ...s, [r.id]: loaded.snap }));
     }
     setSelectedId(r.id);
   }
@@ -2336,20 +2522,18 @@ function App() {
     }));
   }
 
-  function openRequest(r: HttpRequest) {
+  function openRequest(r: HttpRequest, at?: number) {
     snapshotActive();
     setEnvViewId(null);
-    setOpenTabs((tabs) => (tabs.includes(r.id) ? tabs : [...tabs, r.id]));
+    setOpenTabs((tabs) => insertTab(tabs, r.id, at ?? tabs.length));
     applyRequest(r, tabCache[r.id]);
     setRail("collections");
   }
 
-  function openSettings() {
+  function openSettings(at?: number) {
     snapshotActive();
     setEnvViewId(null);
-    setOpenTabs((tabs) =>
-      tabs.includes(SETTINGS_ID) ? tabs : [...tabs, SETTINGS_ID],
-    );
+    setOpenTabs((tabs) => insertTab(tabs, SETTINGS_ID, at ?? tabs.length));
     setSelectedId(SETTINGS_ID);
   }
 
@@ -2358,11 +2542,20 @@ function App() {
     setSettingsSection(wsSettingsId(id));
   }
 
-  function openCollectionDocs(collectionId: string) {
+  function openCollectionDocs(collectionId: string, at?: number) {
     snapshotActive();
     setEnvViewId(null);
     const tid = coldocTabId(collectionId);
-    setOpenTabs((tabs) => (tabs.includes(tid) ? tabs : [...tabs, tid]));
+    setOpenTabs((tabs) => insertTab(tabs, tid, at ?? tabs.length));
+    setSelectedId(tid);
+  }
+
+  function openHistoryTab(h: HistoryEntry, at?: number) {
+    snapshotActive();
+    setEnvViewId(null);
+    setHistCache((c) => ({ ...c, [h.id]: h }));
+    const tid = histTabId(h.id);
+    setOpenTabs((tabs) => insertTab(tabs, tid, at ?? tabs.length));
     setSelectedId(tid);
   }
 
@@ -2370,7 +2563,7 @@ function App() {
     setEnvViewId(null);
     if (id === selectedId) return;
     snapshotActive();
-    if (id === SETTINGS_ID || id.startsWith(COLDOC_PREFIX)) {
+    if (isSpecialTab(id)) {
       setSelectedId(id);
       return;
     }
@@ -2385,12 +2578,159 @@ function App() {
     setRail("environments");
   }
 
-  function closeTab(id: string) {
+  function stripTabIds(): string[] {
+    return envViewId ? [...openTabs, `env:${envViewId}`] : openTabs;
+  }
+
+  function activeStripId(): string | null {
+    if (envViewId) return `env:${envViewId}`;
+    return selectedId;
+  }
+
+  function closeTab(id: string, remember = true) {
+    if (remember) void requestCloseTabs([id], true);
+    else closeTabs([id], false);
+  }
+
+  function dropTabState(ids: string[]) {
+    setTabCache((c) => {
+      const next = { ...c };
+      for (const id of ids) {
+        if (id !== SETTINGS_ID && !id.startsWith(HIST_PREFIX)) delete next[id];
+      }
+      return next;
+    });
+    setSavedById((s) => {
+      const next = { ...s };
+      for (const id of ids) {
+        if (id !== SETTINGS_ID && !id.startsWith(HIST_PREFIX)) delete next[id];
+      }
+      return next;
+    });
+    setHistCache((c) => {
+      const next = { ...c };
+      for (const id of ids) {
+        const hid = parseHistTab(id);
+        if (hid) delete next[hid];
+      }
+      return next;
+    });
+  }
+
+  function tabTitle(id: string): string {
+    if (id === selectedId && draft) return draft.name || "Untitled";
+    const cached = tabCache[id]?.draft;
+    if (cached) return cached.name || "Untitled";
+    return requests.find((r) => r.id === id)?.name || "Untitled";
+  }
+
+  async function saveTabById(id: string): Promise<boolean> {
+    try {
+      if (id === selectedId && draft) {
+        const saved = await save();
+        return !!saved;
+      }
+      const cached = tabCache[id];
+      const fromList = requests.find((r) => r.id === id);
+      if (!cached && !fromList) return true;
+      const d = cached?.draft ?? fromList!;
+      const h = cached?.headers ?? parsePairs(d.headersJson);
+      const q = cached?.query ?? splitUrl(d.url).query;
+      const base = cached?.urlBase ?? splitUrl(d.url).base;
+      const bp = cached?.bodyPairs ?? parsePairs(d.bodyPairsJson || "[]");
+      const pp =
+        cached?.pathPairs ??
+        mergePathPairs(base, parsePairs(d.pathVarsJson || "[]"));
+      const request: HttpRequest = {
+        ...normalizeRequest(d),
+        url: joinUrl(base, q),
+        headersJson: pairsToJson(h),
+        bodyPairsJson: bodyPairsToJson(bp),
+        pathVarsJson: pairsToJson(pp),
+      };
+      const saved = await invoke<HttpRequest>("upsert_request", { request });
+      const loaded = snapFromRequest(saved);
+      setSavedById((s) => ({ ...s, [saved.id]: loaded.snap }));
+      setTabCache((c) => {
+        if (!c[saved.id]) return c;
+        return {
+          ...c,
+          [saved.id]: {
+            ...c[saved.id]!,
+            draft: loaded.draft,
+            headers: loaded.headers,
+            query: loaded.query,
+            bodyPairs: loaded.bodyPairs,
+            pathPairs: loaded.pathPairs,
+            urlBase: loaded.urlBase,
+          },
+        };
+      });
+      await refreshRequests(saved.collectionId, saved.id);
+      return true;
+    } catch (e) {
+      setError(String(e));
+      return false;
+    }
+  }
+
+  /** Prompt Save / Don't save / Cancel when closing dirty request tabs. */
+  async function requestCloseTabs(ids: string[], remember = true) {
+    const unique = [...new Set(ids.filter(Boolean))];
+    if (unique.length === 0) return;
+    const dirtyIds = unique.filter(
+      (id) => !isSpecialTab(id) && !id.startsWith("env:") && tabDirty(id),
+    );
+    if (dirtyIds.length > 0) {
+      const message =
+        dirtyIds.length === 1
+          ? `Save changes to "${tabTitle(dirtyIds[0])}" before closing?`
+          : `${dirtyIds.length} tabs have unsaved changes. Save before closing?`;
+      const choice = await dialogs.unsaved({ message });
+      if (choice === "cancel") return;
+      if (choice === "save") {
+        for (const id of dirtyIds) {
+          const ok = await saveTabById(id);
+          if (!ok) return;
+        }
+      }
+    }
+    closeTabs(unique, remember);
+  }
+
+  function closeTabs(ids: string[], remember = true) {
+    const unique = [...new Set(ids.filter(Boolean))];
+    if (unique.length === 0) return;
+    if (selectedId && unique.includes(selectedId)) snapshotActive();
+    if (remember) {
+      const focus = (() => {
+        if (envViewId && unique.includes(`env:${envViewId}`)) {
+          return `env:${envViewId}`;
+        }
+        if (selectedId && unique.includes(selectedId)) return selectedId;
+        return undefined;
+      })();
+      const next = pushClosed(
+        closedTabs,
+        entriesToClose(stripTabIds(), unique, focus),
+      );
+      const evicted = closedTabs
+        .filter((e) => !next.some((n) => n.id === e.id))
+        .map((e) => e.id);
+      setClosedTabs(next);
+      if (evicted.length) dropTabState(evicted);
+    } else {
+      dropTabState(unique);
+    }
+    if (unique.some((id) => id.startsWith("env:"))) setEnvViewId(null);
+    const tabIds = unique.filter((id) => !id.startsWith("env:"));
+    if (tabIds.length === 0) return;
+    const remove = new Set(tabIds);
     setOpenTabs((tabs) => {
-      const next = tabs.filter((t) => t !== id);
-      if (id === selectedId) {
+      const next = tabs.filter((t) => !remove.has(t));
+      if (selectedId && remove.has(selectedId)) {
         const fallback = next[next.length - 1];
-        if (fallback === SETTINGS_ID || fallback?.startsWith(COLDOC_PREFIX)) {
+        if (fallback && isSpecialTab(fallback)) {
           setSelectedId(fallback);
         } else if (fallback) {
           const r = requests.find((x) => x.id === fallback);
@@ -2410,16 +2750,114 @@ function App() {
       }
       return next;
     });
-    if (id !== SETTINGS_ID) {
-      setTabCache((c) => {
-        const { [id]: _, ...rest } = c;
-        return rest;
-      });
-      setSavedById((s) => {
-        const { [id]: _, ...rest } = s;
-        return rest;
-      });
+  }
+
+  function canRestoreTab(id: string): boolean {
+    if (id === SETTINGS_ID) return true;
+    const colId = parseColdocTab(id);
+    if (colId) return collections.some((c) => c.id === colId);
+    const hid = parseHistTab(id);
+    if (hid) {
+      return !!(
+        histCache[hid] ||
+        history.find((h) => h.id === hid) ||
+        requestHistory.find((h) => h.id === hid)
+      );
     }
+    if (id.startsWith("env:")) {
+      return envs.some((e) => e.id === id.slice(4));
+    }
+    return requests.some((r) => r.id === id);
+  }
+
+  function restoreClosedTab(id: string, at: number) {
+    if (id === SETTINGS_ID) {
+      openSettings(at);
+      return;
+    }
+    const colId = parseColdocTab(id);
+    if (colId) {
+      if (collections.some((c) => c.id === colId)) openCollectionDocs(colId, at);
+      return;
+    }
+    const hid = parseHistTab(id);
+    if (hid) {
+      const h =
+        histCache[hid] ??
+        history.find((x) => x.id === hid) ??
+        requestHistory.find((x) => x.id === hid);
+      if (h) openHistoryTab(h, at);
+      return;
+    }
+    if (id.startsWith("env:")) {
+      const envId = id.slice(4);
+      if (envs.some((e) => e.id === envId)) openEnvView(envId);
+      return;
+    }
+    const r = requests.find((x) => x.id === id);
+    if (r) openRequest(r, at);
+  }
+
+  function reopenClosedTab() {
+    let rest = closedTabs;
+    let entry: ClosedTab | null = null;
+    while (rest.length) {
+      const popped = popClosed(rest);
+      if (!popped) break;
+      rest = popped.rest;
+      if (canRestoreTab(popped.entry.id)) {
+        entry = popped.entry;
+        break;
+      }
+    }
+    if (!entry) return;
+    setClosedTabs(rest);
+    restoreClosedTab(entry.id, entry.index);
+  }
+
+  function openTabMenu(id: string, ev: { clientX: number; clientY: number }) {
+    setTreeMenu(null);
+    const width = 228;
+    const height = 248;
+    let left = ev.clientX;
+    let top = ev.clientY;
+    if (left + width > window.innerWidth - 8) {
+      left = Math.max(8, window.innerWidth - width - 8);
+    }
+    if (top + height > window.innerHeight - 8) {
+      top = Math.max(8, window.innerHeight - height - 8);
+    }
+    setTabMenu({ id, top, left });
+  }
+
+  async function confirmCloseAll() {
+    const ids = stripTabIds();
+    if (ids.length === 0) return;
+    const dirtyN = ids.filter(
+      (id) => !isSpecialTab(id) && !id.startsWith("env:") && tabDirty(id),
+    ).length;
+    if (dirtyN > 0) {
+      await requestCloseTabs(ids);
+      return;
+    }
+    const ok = await dialogs.confirm({
+      title: "Close all tabs?",
+      message: `Close ${ids.length} open tab${ids.length === 1 ? "" : "s"}? Reopen with Ctrl+Shift+T.`,
+      confirmLabel: "Close all",
+    });
+    if (!ok) return;
+    closeTabs(ids);
+  }
+
+  function runTabClose(action: TabCloseAction, id: string) {
+    setTabMenu(null);
+    if (action === "closeAll") {
+      void confirmCloseAll();
+      return;
+    }
+    const tabs = stripTabIds();
+    const index = tabs.indexOf(id);
+    void requestCloseTabs(idsToClose(action, tabs, index, tabDirty));
   }
 
   function openTabSearch() {
@@ -2542,7 +2980,7 @@ function App() {
 
   // Restore editor for the selected request after the collection tree loads.
   useEffect(() => {
-    if (!selectedId || selectedId === SETTINGS_ID || envViewId) return;
+    if (!selectedId || isSpecialTab(selectedId) || envViewId) return;
     if (draft?.id === selectedId) return;
     const r = requests.find((x) => x.id === selectedId);
     if (r) applyRequest(r);
@@ -2552,9 +2990,10 @@ function App() {
   // First visit to a collection with no tabs: open the first request (old UX).
   useEffect(() => {
     if (!collectionId || requests.length === 0) return;
-    if (selectedId === SETTINGS_ID || envViewId) return;
+    if (selectedId && isSpecialTab(selectedId)) return;
+    if (envViewId) return;
     if (selectedId && requests.some((r) => r.id === selectedId)) return;
-    if (openTabs.some((t) => t !== SETTINGS_ID)) return;
+    if (openTabs.some((t) => !isSpecialTab(t))) return;
     if (selectedId != null) return;
     const pick = requests[0];
     setOpenTabs((tabs) => (tabs.includes(pick.id) ? tabs : [...tabs, pick.id]));
@@ -2651,9 +3090,9 @@ function App() {
     [treeSearch, folders, requests],
   );
   const treeSearchQ = treeSearch.trim().toLowerCase();
-  const anyFolderExpanded = folders.some(
-    (f) => expandedFolders[f.id] !== false,
-  );
+  const anyFolderExpanded =
+    (collectionId ? expandedCollections[collectionId] !== false : false) ||
+    folders.some((f) => expandedFolders[f.id] !== false);
   const viewingEnv = envViewId
     ? envs.find((e) => e.id === envViewId) ?? null
     : null;
@@ -2662,7 +3101,7 @@ function App() {
     const items: {
       id: string;
       name: string;
-      kind: "settings" | "request" | "env" | "docs";
+      kind: "settings" | "request" | "env" | "docs" | "history";
       method?: string;
       dirty: boolean;
       active: boolean;
@@ -2677,6 +3116,26 @@ function App() {
           dirty: false,
           active: !envViewId && selectedId === SETTINGS_ID,
           haystack: "settings",
+        });
+        continue;
+      }
+      const histId = parseHistTab(id);
+      if (histId) {
+        const h =
+          histCache[histId] ??
+          history.find((x) => x.id === histId) ??
+          requestHistory.find((x) => x.id === histId);
+        const name = h
+          ? historyTitle(h, requestTitles)
+          : "History";
+        items.push({
+          id,
+          name,
+          kind: "history",
+          method: h?.method,
+          dirty: false,
+          active: !envViewId && selectedId === id,
+          haystack: `${h?.method ?? ""} ${name} ${h?.url ?? ""} history`.toLowerCase(),
         });
         continue;
       }
@@ -2837,6 +3296,28 @@ function App() {
   }, [workspaceId]);
 
   useEffect(() => {
+    const histId = parseHistTab(selectedId);
+    if (histId) {
+      setHistoryOpen(false);
+      const known =
+        histCache[histId] ??
+        history.find((x) => x.id === histId) ??
+        requestHistory.find((x) => x.id === histId);
+      if (known) {
+        setHistCache((c) => (c[histId] ? c : { ...c, [histId]: known }));
+        return;
+      }
+      void invoke<HistoryEntry | null>("get_history", { id: histId })
+        .then((e) => {
+          if (e) setHistCache((c) => ({ ...c, [e.id]: e }));
+        })
+        .catch((e) => setError(String(e)));
+      return;
+    }
+    if (!selectedId || isSpecialTab(selectedId)) {
+      setHistoryOpen(false);
+      return;
+    }
     refreshRequestHistory(selectedId).catch((e) => setError(String(e)));
     setHistoryOpen(false);
     setViewingHistoryId(null);
@@ -2866,16 +3347,54 @@ function App() {
       pathVarsJson: pairsToJson(pathPairs),
     };
     const saved = await invoke<HttpRequest>("upsert_request", { request });
-    const n = normalizeRequest(saved);
-    setDraft(n);
-    markSaved(n);
+    const loaded = snapFromRequest(saved);
+    setDraft(loaded.draft);
+    setHeaders(loaded.headers);
+    setQuery(loaded.query);
+    setBodyPairs(loaded.bodyPairs);
+    setPathPairs(loaded.pathPairs);
+    setUrlBase(loaded.urlBase);
+    setSavedById((s) => ({ ...s, [saved.id]: loaded.snap }));
     setTabCache((c) => {
       const { [saved.id]: _, ...rest } = c;
       return rest;
     });
     await refreshRequests(saved.collectionId, saved.id);
-    return n;
+    return loaded.draft;
   }
+
+  const autoSaveBusy = useRef(false);
+  useEffect(() => {
+    if (!autoSave) return;
+    if (!selectedId || isSpecialTab(selectedId) || envViewId) return;
+    if (!draft || draft.id !== selectedId) return;
+    if (!tabDirty(selectedId)) return;
+    const delay = clampAutoSaveDelay(autoSaveDelayMs);
+    const t = window.setTimeout(() => {
+      if (autoSaveBusy.current) return;
+      autoSaveBusy.current = true;
+      void save()
+        .catch((e) => setError(String(e)))
+        .finally(() => {
+          autoSaveBusy.current = false;
+        });
+    }, delay);
+    return () => window.clearTimeout(t);
+    // Intentionally keyed on editor fields + dirty baseline, not `save` identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    autoSave,
+    autoSaveDelayMs,
+    selectedId,
+    envViewId,
+    draft,
+    headers,
+    query,
+    bodyPairs,
+    pathPairs,
+    urlBase,
+    savedById,
+  ]);
 
   async function refreshWorkspaceHistory() {
     if (!workspaceId) {
@@ -2887,6 +3406,27 @@ function App() {
       limit: 100,
     });
     setHistory(list);
+  }
+
+  async function clearWorkspaceHistory() {
+    if (!workspaceId || history.length === 0) return;
+    const ok = await dialogs.confirm({
+      title: "Clean up history?",
+      message:
+        "Delete all saved responses in this workspace. This cannot be undone.",
+      confirmLabel: "Clean up",
+      danger: true,
+    });
+    if (!ok) return;
+    await invoke("clear_workspace_history", { workspaceId });
+    closeTabs(
+      openTabs.filter((id) => id.startsWith(HIST_PREFIX)),
+      false,
+    );
+    setHistory([]);
+    setRequestHistory([]);
+    setHistCache({});
+    setHistoryOpen(false);
   }
 
   async function refreshRequestHistory(requestId: string | null) {
@@ -2913,6 +3453,7 @@ function App() {
     body?: string;
     bodyPretty?: string | null;
     headers?: [string, string][];
+    requestJson?: string | null;
   }) {
     if (!workspaceId) return;
     const entry = await invoke<HistoryEntry>("insert_history", {
@@ -2932,6 +3473,7 @@ function App() {
         headersJson: partial.headers
           ? JSON.stringify(partial.headers)
           : null,
+        requestJson: partial.requestJson ?? null,
         createdAt: Date.now(),
       },
     });
@@ -2939,7 +3481,52 @@ function App() {
     if (partial.requestId === selectedId || partial.requestId === draft?.id) {
       setRequestHistory((h) => [entry, ...h].slice(0, 50));
     }
+    setHistCache((c) => ({ ...c, [entry.id]: entry }));
     setViewingHistoryId(entry.id);
+  }
+
+  function historyRequestSnapshot(
+    req: {
+      url: string;
+      headersJson?: string;
+      body?: string;
+      bodyType?: string;
+      bodyPairsJson?: string;
+      authType?: string;
+      authJson?: string;
+      pathVarsJson?: string;
+    },
+    resolvedUrl: string,
+  ): string {
+    let headers: unknown = [];
+    try {
+      headers = JSON.parse(req.headersJson || "[]");
+    } catch {
+      headers = [];
+    }
+    let bodyPairs: unknown = [];
+    try {
+      bodyPairs = JSON.parse(req.bodyPairsJson || "[]");
+    } catch {
+      bodyPairs = [];
+    }
+    let pathVars: unknown = [];
+    try {
+      pathVars = JSON.parse(req.pathVarsJson || "[]");
+    } catch {
+      pathVars = [];
+    }
+    return JSON.stringify({
+      urlTemplate: req.url,
+      resolvedUrl,
+      headers,
+      body: req.body?.trim() ? req.body : null,
+      bodyType: req.bodyType ?? "none",
+      bodyPairs,
+      authType: req.authType ?? "none",
+      authJson: req.authJson ?? "{}",
+      pathVars,
+    });
   }
 
   function applyHistoryEntry(h: HistoryEntry) {
@@ -2999,7 +3586,7 @@ function App() {
       await recordHistory({
         requestId: saved.id,
         method: saved.method,
-        url: saved.url,
+        url: res.resolvedUrl || saved.url,
         status: res.status,
         statusText: res.statusText,
         elapsedMs: res.elapsedMs,
@@ -3007,6 +3594,7 @@ function App() {
         body: res.body,
         bodyPretty: res.bodyPretty,
         headers: res.headers,
+        requestJson: historyRequestSnapshot(saved, res.resolvedUrl || saved.url),
       });
     } catch (e) {
       const msg = String(e);
@@ -3019,6 +3607,19 @@ function App() {
         error: msg,
         elapsedMs: 0,
         sizeBytes: 0,
+        requestJson: historyRequestSnapshot(
+          {
+            url: draft.url,
+            headersJson: JSON.stringify(headers),
+            body: draft.body,
+            bodyType: draft.bodyType,
+            bodyPairsJson: draft.bodyPairsJson,
+            authType: draft.authType,
+            authJson: draft.authJson,
+            pathVarsJson: draft.pathVarsJson,
+          },
+          composedUrl,
+        ),
       });
     } finally {
       setSending(false);
@@ -3114,12 +3715,18 @@ function App() {
     const next: Record<string, boolean> = {};
     for (const f of folders) next[f.id] = false;
     setExpandedFolders(next);
+    if (collectionId) {
+      setExpandedCollections((prev) => ({ ...prev, [collectionId]: false }));
+    }
   }
 
   function expandAllFolders() {
     const next: Record<string, boolean> = {};
     for (const f of folders) next[f.id] = true;
     setExpandedFolders(next);
+    if (collectionId) {
+      setExpandedCollections((prev) => ({ ...prev, [collectionId]: true }));
+    }
   }
 
   async function removeFolder(id: string) {
@@ -3230,7 +3837,7 @@ function App() {
     if (!ok) return;
     await invoke("delete_request", { id });
     setTreeMenu(null);
-    closeTab(id);
+    closeTab(id, false);
     await refreshTree(collectionId);
   }
 
@@ -3537,6 +4144,17 @@ function App() {
     saveDevMode(on);
   }
 
+  function applyAutoSave(on: boolean) {
+    setAutoSave(on);
+    saveAutoSave(on);
+  }
+
+  function applyAutoSaveDelayMs(ms: number) {
+    const next = clampAutoSaveDelay(ms);
+    setAutoSaveDelayMs(next);
+    saveAutoSaveDelayMs(next);
+  }
+
   async function saveEnvVar(name: string, value: string) {
     if (!activeEnv) return;
     const pairs = [
@@ -3772,6 +4390,17 @@ function App() {
         if (next) switchTab(next);
         break;
       }
+      case "closeTab": {
+        const id = activeStripId();
+        if (id) closeTab(id);
+        break;
+      }
+      case "closeAllTabs":
+        void confirmCloseAll();
+        break;
+      case "reopenTab":
+        reopenClosedTab();
+        break;
     }
   };
 
@@ -3837,6 +4466,24 @@ function App() {
       window.removeEventListener("scroll", onScroll, true);
     };
   }, [treeMenu]);
+
+  useEffect(() => {
+    if (!tabMenu) return;
+    function onDoc(e: MouseEvent) {
+      const el = e.target as HTMLElement | null;
+      if (el?.closest?.(".tab-ctx-menu")) return;
+      setTabMenu(null);
+    }
+    function onScroll() {
+      setTabMenu(null);
+    }
+    document.addEventListener("mousedown", onDoc);
+    window.addEventListener("scroll", onScroll, true);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      window.removeEventListener("scroll", onScroll, true);
+    };
+  }, [tabMenu]);
 
   useEffect(() => {
     if (!renaming) return;
@@ -4396,6 +5043,8 @@ function App() {
                     })
                     .map((col) => {
                     const active = col.id === collectionId;
+                    const colOpen =
+                      treeSearchQ || expandedCollections[col.id] !== false;
                     const colMenuOpen =
                       treeMenu?.target === "collection" &&
                       treeMenu.id === col.id;
@@ -4412,7 +5061,13 @@ function App() {
                           }`}
                           onClick={() => {
                             if (colRenaming) return;
-                            if (!active) setCollectionId(col.id);
+                            if (!active) {
+                              setCollectionId(col.id);
+                              setExpandedCollections((prev) => ({
+                                ...prev,
+                                [col.id]: true,
+                              }));
+                            }
                             setTreeAnchor({ kind: "collection", id: col.id });
                           }}
                           onDragOver={(e) => {
@@ -4438,13 +5093,38 @@ function App() {
                               : "Switch to this collection"
                           }
                         >
-                          <span className="tree-twist root-twist">
-                            {active ? (
+                          <button
+                            type="button"
+                            className="tree-twist"
+                            aria-label={
+                              active && colOpen ? "Collapse" : "Expand"
+                            }
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (!active) {
+                                setCollectionId(col.id);
+                                setExpandedCollections((prev) => ({
+                                  ...prev,
+                                  [col.id]: true,
+                                }));
+                                setTreeAnchor({
+                                  kind: "collection",
+                                  id: col.id,
+                                });
+                                return;
+                              }
+                              setExpandedCollections((prev) => ({
+                                ...prev,
+                                [col.id]: !colOpen,
+                              }));
+                            }}
+                          >
+                            {active && colOpen ? (
                               <ChevronDown {...Ism} />
                             ) : (
                               <ChevronRight {...Ism} />
                             )}
-                          </span>
+                          </button>
                           <span className="tree-folder-icon col-icon" aria-hidden>
                             <Layers {...Ifill} />
                           </span>
@@ -4510,7 +5190,7 @@ function App() {
                             </button>
                           </div>
                         </div>
-                        {active && (
+                        {active && colOpen && (
                           <ul className="tree nested">
                             {requests.length === 0 && folders.length === 0 ? (
                               <li className="empty-side nested-empty">
@@ -4604,6 +5284,14 @@ function App() {
             <>
               <div className="sidebar-head">
                 <span className="sidebar-head-title">History</span>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={history.length === 0}
+                  onClick={() => void clearWorkspaceHistory()}
+                >
+                  <Trash2 {...Ism} /> Clean up
+                </Button>
               </div>
               <div className="sidebar-banner info">
                 Workspace history stays on this device.
@@ -4621,47 +5309,9 @@ function App() {
                           <button
                             type="button"
                             className={`history-entry ${
-                              viewingHistoryId === h.id ? "active" : ""
+                              parseHistTab(selectedId) === h.id ? "active" : ""
                             }`}
-                            onClick={() => {
-                              void (async () => {
-                                if (h.requestId) {
-                                  const cols = await invoke<Collection[]>(
-                                    "list_collections",
-                                    { workspaceId },
-                                  );
-                                  for (const c of cols) {
-                                    const list = await invoke<HttpRequest[]>(
-                                      "list_requests",
-                                      { collectionId: c.id },
-                                    );
-                                    const r = list.find(
-                                      (x) => x.id === h.requestId,
-                                    );
-                                    if (r) {
-                                      setCollections(cols);
-                                      setCollectionId(c.id);
-                                      setRequests(list);
-                                      openRequest(r);
-                                      applyHistoryEntry(h);
-                                      setRail("collections");
-                                      return;
-                                    }
-                                  }
-                                }
-                                const { base, query: q } = splitUrl(h.url);
-                                setUrlBase(base);
-                                setQuery(q);
-                                setPathPairs((prev) => mergePathPairs(base, prev));
-                                if (draft)
-                                  setDraft({
-                                    ...draft,
-                                    method: h.method,
-                                    url: h.url,
-                                  });
-                                applyHistoryEntry(h);
-                              })();
-                            }}
+                            onClick={() => openHistoryTab(h)}
                           >
                             <span className={methodClass(h.method)}>
                               {methodLabel(h.method)}
@@ -4730,6 +5380,10 @@ function App() {
                         !envViewId && selectedId === SETTINGS_ID ? "active" : ""
                       }`}
                       onClick={() => switchTab(SETTINGS_ID)}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        openTabMenu(SETTINGS_ID, e);
+                      }}
                       onMouseDown={(e) => {
                         if (e.button === 1) {
                           e.preventDefault();
@@ -4765,6 +5419,10 @@ function App() {
                         !envViewId && selectedId === id ? "active" : ""
                       }`}
                       onClick={() => switchTab(id)}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        openTabMenu(id, e);
+                      }}
                       onMouseDown={(e) => {
                         if (e.button === 1) {
                           e.preventDefault();
@@ -4792,6 +5450,50 @@ function App() {
                     </div>
                   );
                 }
+                const histId = parseHistTab(id);
+                if (histId) {
+                  const h =
+                    histCache[histId] ??
+                    history.find((x) => x.id === histId) ??
+                    requestHistory.find((x) => x.id === histId);
+                  return (
+                    <div
+                      key={id}
+                      className={`opentab env-tab ${
+                        !envViewId && selectedId === id ? "active" : ""
+                      }`}
+                      onClick={() => switchTab(id)}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        openTabMenu(id, e);
+                      }}
+                      onMouseDown={(e) => {
+                        if (e.button === 1) {
+                          e.preventDefault();
+                          closeTab(id);
+                        }
+                      }}
+                    >
+                      <span className={methodClass(h?.method ?? "GET")}>
+                        {methodLabel(h?.method ?? "GET")}
+                      </span>
+                      <span className="opentab-name">
+                        {h ? historyTitle(h, requestTitles) : "History"}
+                      </span>
+                      <button
+                        type="button"
+                        className="opentab-close"
+                        aria-label="Close history"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          closeTab(id);
+                        }}
+                      >
+                        <X {...Ism} />
+                      </button>
+                    </div>
+                  );
+                }
                 const cached = tabCache[id]?.draft;
                 const fromList = requests.find((r) => r.id === id);
                 const r =
@@ -4804,6 +5506,10 @@ function App() {
                       !envViewId && id === selectedId ? "active" : ""
                     }`}
                     onClick={() => switchTab(id)}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      openTabMenu(id, e);
+                    }}
                     onMouseDown={(e) => {
                       if (e.button === 1) {
                         e.preventDefault();
@@ -4838,6 +5544,10 @@ function App() {
                 <div
                   className={`opentab env-tab ${envViewId ? "active" : ""}`}
                   onClick={() => openEnvView(viewingEnv.id)}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    openTabMenu(`env:${viewingEnv.id}`, e);
+                  }}
                 >
                   <span className="env-tab-mark" aria-hidden>
                     <Braces {...Ism} />
@@ -4958,6 +5668,10 @@ function App() {
                             ) : t.kind === "docs" ? (
                               <span className="settings-tab-mark" aria-hidden>
                                 <BookOpen {...Ism} />
+                              </span>
+                            ) : t.kind === "history" ? (
+                              <span className={methodClass(t.method ?? "GET")}>
+                                {methodLabel(t.method ?? "GET")}
                               </span>
                             ) : t.kind === "env" ? (
                               <span className="env-tab-mark" aria-hidden>
@@ -5083,6 +5797,10 @@ function App() {
               onSection={setSettingsSection}
               layoutDock={layoutDock}
               onLayoutDock={applyDock}
+              autoSave={autoSave}
+              onAutoSave={applyAutoSave}
+              autoSaveDelayMs={autoSaveDelayMs}
+              onAutoSaveDelayMs={applyAutoSaveDelayMs}
               devMode={devMode}
               onDevMode={applyDevMode}
               mcpStatus={mcpStatus}
@@ -5093,6 +5811,66 @@ function App() {
               onSwitchWorkspace={switchWorkspaceFromSettings}
               onDeleteWorkspace={(ws) => void removeWorkspace(ws)}
             />
+          ) : parseHistTab(selectedId) ? (
+            (() => {
+              const hid = parseHistTab(selectedId)!;
+              const entry =
+                histCache[hid] ??
+                history.find((x) => x.id === hid) ??
+                requestHistory.find((x) => x.id === hid) ??
+                null;
+              if (!entry) {
+                return (
+                  <div className="empty-main">
+                    <h2>History entry not found</h2>
+                    <p>It may have been cleared. Close this tab or pick another run.</p>
+                  </div>
+                );
+              }
+              const reqName = entry.requestId
+                ? requestTitles.get(entry.requestId)
+                : null;
+              return (
+                <HistoryDetail
+                  key={entry.id}
+                  entry={entry}
+                  requestName={reqName}
+                  onOpenRequest={
+                    entry.requestId
+                      ? () => {
+                          void (async () => {
+                            const rid = entry.requestId!;
+                            const fromList = requests.find((r) => r.id === rid);
+                            if (fromList) {
+                              openRequest(fromList);
+                              return;
+                            }
+                            if (!workspaceId) return;
+                            const cols = await invoke<Collection[]>(
+                              "list_collections",
+                              { workspaceId },
+                            );
+                            for (const c of cols) {
+                              const list = await invoke<HttpRequest[]>(
+                                "list_requests",
+                                { collectionId: c.id },
+                              );
+                              const r = list.find((x) => x.id === rid);
+                              if (r) {
+                                setCollections(cols);
+                                setCollectionId(c.id);
+                                setRequests(list);
+                                openRequest(r);
+                                return;
+                              }
+                            }
+                          })();
+                        }
+                      : undefined
+                  }
+                />
+              );
+            })()
           ) : parseColdocTab(selectedId) ? (
             <CollectionDocView
               key={selectedId}
@@ -5604,36 +6382,53 @@ function App() {
                                         {label}
                                       </div>
                                       {rows.map((h) => (
-                                        <button
+                                        <div
                                           key={h.id}
-                                          type="button"
-                                          className={`req-history-item ${
-                                            viewingHistoryId === h.id
-                                              ? "current"
-                                              : ""
-                                          }`}
-                                          onClick={() => {
-                                            applyHistoryEntry(h);
-                                            setHistoryOpen(false);
-                                          }}
+                                          className="req-history-row"
                                         >
-                                          <span
-                                            className={
-                                              h.error
-                                                ? "bad"
-                                                : (h.status ?? 0) < 400
-                                                  ? "ok"
-                                                  : "bad"
-                                            }
+                                          <button
+                                            type="button"
+                                            className={`req-history-item ${
+                                              viewingHistoryId === h.id
+                                                ? "current"
+                                                : ""
+                                            }`}
+                                            onClick={() => {
+                                              applyHistoryEntry(h);
+                                              setHistoryOpen(false);
+                                            }}
                                           >
-                                            {historyMeta(h)}
-                                          </span>
-                                          {viewingHistoryId === h.id && (
-                                            <span className="req-history-check">
-                                              ✓
+                                            <span
+                                              className={
+                                                h.error
+                                                  ? "bad"
+                                                  : (h.status ?? 0) < 400
+                                                    ? "ok"
+                                                    : "bad"
+                                              }
+                                            >
+                                              {historyMeta(h)}
                                             </span>
-                                          )}
-                                        </button>
+                                            {viewingHistoryId === h.id && (
+                                              <span className="req-history-check">
+                                                ✓
+                                              </span>
+                                            )}
+                                          </button>
+                                          <button
+                                            type="button"
+                                            className="req-history-popout"
+                                            data-tip="Open full snapshot"
+                                            aria-label="Open full snapshot"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              openHistoryTab(h);
+                                              setHistoryOpen(false);
+                                            }}
+                                          >
+                                            <ExternalLink {...Ism} />
+                                          </button>
+                                        </div>
                                       ))}
                                     </li>
                                   ),
@@ -5783,32 +6578,42 @@ function App() {
                             <li key={label}>
                               <div className="history-group-label">{label}</div>
                               {rows.map((h) => (
-                                <button
-                                  key={h.id}
-                                  type="button"
-                                  className={`req-history-item ${
-                                    viewingHistoryId === h.id ? "current" : ""
-                                  }`}
-                                  onClick={() => applyHistoryEntry(h)}
-                                >
-                                  <span
-                                    className={
-                                      h.error
-                                        ? "bad"
-                                        : (h.status ?? 0) < 400
-                                          ? "ok"
-                                          : "bad"
-                                    }
+                                <div key={h.id} className="req-history-row">
+                                  <button
+                                    type="button"
+                                    className={`req-history-item ${
+                                      viewingHistoryId === h.id ? "current" : ""
+                                    }`}
+                                    onClick={() => applyHistoryEntry(h)}
                                   >
-                                    {historyMeta(h)}
-                                  </span>
-                                  <span className="muted mono truncate">
-                                    {h.url}
-                                  </span>
-                                  {viewingHistoryId === h.id && (
-                                    <span className="req-history-check">✓</span>
-                                  )}
-                                </button>
+                                    <span
+                                      className={
+                                        h.error
+                                          ? "bad"
+                                          : (h.status ?? 0) < 400
+                                            ? "ok"
+                                            : "bad"
+                                      }
+                                    >
+                                      {historyMeta(h)}
+                                    </span>
+                                    <span className="muted mono truncate">
+                                      {h.url}
+                                    </span>
+                                    {viewingHistoryId === h.id && (
+                                      <span className="req-history-check">✓</span>
+                                    )}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="req-history-popout"
+                                    data-tip="Open full snapshot"
+                                    aria-label="Open full snapshot"
+                                    onClick={() => openHistoryTab(h)}
+                                  >
+                                    <ExternalLink {...Ism} />
+                                  </button>
+                                </div>
                               ))}
                             </li>
                           ))}
@@ -6056,6 +6861,60 @@ function App() {
               </>
             )}
           </div>,
+          document.body,
+        )}
+
+      {tabMenu &&
+        createPortal(
+          (() => {
+            const tabs = stripTabIds();
+            const index = tabs.indexOf(tabMenu.id);
+            const enabled = tabCloseEnabled(tabs, index, tabDirty);
+            const key = (action: ShortcutAction) =>
+              SHORTCUTS.find((s) => s.action === action)?.keys.join("+");
+            const item = (
+              action: TabCloseAction,
+              label: string,
+              shortcut?: string,
+            ) => (
+              <button
+                type="button"
+                role="menuitem"
+                disabled={!enabled[action]}
+                onClick={() => runTabClose(action, tabMenu.id)}
+              >
+                {label}
+                {shortcut && <span className="tab-menu-key">{shortcut}</span>}
+              </button>
+            );
+            return (
+              <div
+                className="explorer-menu tree-row-menu-fixed tab-ctx-menu"
+                role="menu"
+                style={{ top: tabMenu.top, left: tabMenu.left }}
+              >
+                {item("close", "Close", key("closeTab"))}
+                {item("closeOthers", "Close Others")}
+                {item("closeToRight", "Close to the Right")}
+                {item("closeSaved", "Close Saved")}
+                <div className="explorer-menu-sep" />
+                {item("closeAll", "Close All", key("closeAllTabs"))}
+                <div className="explorer-menu-sep" />
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={closedTabs.length === 0}
+                  onClick={() => {
+                    setTabMenu(null);
+                    reopenClosedTab();
+                  }}
+                >
+                  Reopen Closed Tab
+                  <span className="tab-menu-key">{key("reopenTab")}</span>
+                </button>
+              </div>
+            );
+          })(),
           document.body,
         )}
 

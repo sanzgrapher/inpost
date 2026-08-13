@@ -2,7 +2,7 @@
 
 **Purpose:** Living log so any new chat stays on track. Agents **read this first**, then **append** after each user request they work on.
 
-**Last updated:** 2026-08-07 (global search spaces)
+**Last updated:** 2026-08-14 (auto save setting)
 
 ---
 
@@ -11,13 +11,14 @@
 |---|---|
 | **Phase** | Phase 0 ✅ · Phase 1 MCP ✅ · Phase 2 ✅ · Local workspaces ✅ · Settings tab ✅ · Release pipeline ✅ |
 | **Next up** | Phase 3 sync-engine spike (PowerSync vs ElectricSQL) |
+| **OpenAPI MCP** | `import_openapi` / `export_openapi`: `summary` = request name; `tags` = folders (3.2 `parent` when nested) |
 | **PokéAPI ws** | Docs + env-wired requests filled via MCP (Prod active) |
 | **App** | Tauri 2 + React + SQLite · `com.inpost.desktop` · MIT |
 | **UX ref** | Requestly (layout/flow) — proprietary app; study screenshots only |
 | **Arch ref** | Yaak (Tauri/Rust/React) |
 | **MCP ref** | Localhost bridge + `session.json` + bundled `stdio.mjs`; Requestly MCP *packaging* (open MIT SDK) |
 | **Run** | `npm run build:mcp && npm run tauri dev` (or `npm run tauri dev` which runs build:mcp first) |
-| **Check** | `npm run check` → `cargo test -p inpost-core` + `src/searchQuery.ts` / `src/shortcuts.ts` / `src/workspaceSession.ts` / `src/envVar.ts` / `src/envSync.ts` / `src/reqMeta.ts` self-checks |
+| **Check** | `npm run check` → `cargo test -p inpost-core` + `src/searchQuery.ts` / `src/shortcuts.ts` / `src/workspaceSession.ts` / `src/envVar.ts` / `src/envSync.ts` / `src/reqMeta.ts` / `src/tabClose.ts` self-checks |
 | **MCP config** | Keep app open; point Cursor at `~/.local/share/com.inpost.desktop/mcp/stdio.mjs` (Linux) / `%APPDATA%\com.inpost.desktop\mcp\stdio.mjs` (Windows) — or copy from **Settings → MCP** |
 
 ### Key docs
@@ -54,10 +55,63 @@
 - Shortcut table (`src/shortcuts.ts`) drives handler + Settings → Keyboard + empty-response hints  
 - Request body types (none/JSON/text/urlencoded/multipart) + Auth (Bearer/Basic/API key) + path params + header autocomplete + response History tab  
 - Workspace settings: rename / switch / **delete** (confirm dialog; refuses last workspace)
+- History: sidebar → read-only snapshot tab; response History icon/tab → inline preview + pop-out to snapshot; `request_json` on new sends; workspace **Clean up** clears that workspace’s history
+- Tab context menu: Close / Close Others / Close to the Right / Close Saved / Close All / Reopen (enabled only when they apply); Ctrl+W close · Ctrl+Shift+W close all (confirm) · Ctrl+Shift+T reopen stack
+- Sidebar collections collapse/expand (same twistie as folders; persisted in workspace session)
 
 ---
 
 ## Trace log (newest first)
+
+### 2026-08-14 — Auto save setting
+**User asked:** Settings: auto save + save-after delay in ms; when on, save after that delay.
+**Did:** Settings → General → Save: Auto save On/Off + delay ms (250–60000, default 1000). Persisted in localStorage. Debounced `save()` on dirty open request when enabled.
+**Needs next:** Phase 3 sync spike remains next feature.
+
+### 2026-08-14 — False dirty dots + unsaved close prompt
+**User asked:** Tabs from MCP/import show unsaved (blue dots) immediately; closing them never asks to save/cancel.
+**Did:** Dirty compare used raw DB JSON (`snapOf`) while the editor re-serializes via `pairsToJson`/`mergePathPairs` — e.g. `pathVarsJson: "{}"` vs `[["species",""]]`. Open/save now baseline with `snapFromRequest` (same shape as live `curSnap`). Added `dialogs.unsaved` (Save / Don’t save / Cancel); closing dirty request tabs (×, menu, Ctrl+W, close others/right/all) prompts; delete still force-closes without prompt.
+**Needs next:** Phase 3 sync spike remains next feature.
+
+### 2026-08-14 — Collection sidebar collapse
+**User asked:** Could not collapse a collection while folders are collapsible (chevron looked the same).
+**Did:** Collection twist was decorative (ChevronDown when active only). Added `expandedCollections` to workspace session; collection twist is a real toggle; active collection children show only when expanded; switching to a collection expands it; collapse/expand-all includes the active collection.
+**Needs next:** Phase 3 sync spike remains next feature.
+
+### 2026-08-13 — OpenAPI names + folders via official fields
+**User asked:** Only add name/title + folder structure to OpenAPI export/import if the format allows it.
+**Did:** Yes via spec fields — `summary` (display name; preferred over `operationId` on import) and `tags` / root `tags` (folders). Nested folders → Tag Object `parent` and bump doc to OpenAPI **3.2.0**; flat stays **3.0.3**. Wired in [`crates/inpost-core/src/openapi.rs`](../crates/inpost-core/src/openapi.rs) + [`openapi_ops.rs`](../src-tauri/src/openapi_ops.rs) (create folders on import; emit tags from DB folders on export). Live PokéAPI export→reimport into Personal: 5 folders + names like `Get Pokémon` (not `get_pok_mon`). Tests: summary/tags round-trip + nested 3.2 parent.
+**Needs next:** Phase 3 sync spike remains next feature.
+
+### 2026-08-13 — OpenAPI MCP import/export verified (apis.guru + httpbin)
+**User asked:** Add MCP OpenAPI import/export if missing; first import popular specs from apis.guru, then export from Inpost and re-import to prove round-trip.
+**Did:** Tools already exist (`import_openapi` / `export_openapi` → bridge `/v1/openapi/*`). No new tools. Validated via localhost bridge (Cursor `inposts` CallMcpTool fetch failed — likely MCP stdio pointed at Windows path while Linux app runs; use `~/.local/share/com.inpost.desktop/mcp/stdio.mjs`). Import [apis.guru 2.2.0](https://api.apis.guru/v2/specs/apis.guru/2.2.0/openapi.json) → 7 reqs; `listAPIs` live 200 (2529 APIs). Export → re-import: paths/methods/descs/collection desc match; reimported run 200. Import httpbin → 73 reqs; GET `/get` live 200; export→re-import count+ops match (unwrap `{"spec":...}`). Minor: reimport names follow slugified `operationId` (`listAPIs`→`listapis`); export servers are always `{{baseUrl}}`.
+**Needs next:** Optional name round-trip polish (prefer summary on import, or stop lowercasing operationId). Phase 3 sync spike remains next feature.
+
+### 2026-08-13 — Workspace history Clean up
+**User asked:** History screen needs a clean-up button for old history.
+**Did:** History rail header gets **Clean up** (disabled when empty). Confirm, then `clear_workspace_history` deletes that workspace’s `request_history` only. Closes open `__hist__:` tabs, clears request-history popover/cache. Rust unit test: other workspace’s rows stay.
+**Needs next:** Phase 3 sync spike remains next feature.
+
+### 2026-08-13 — Close-all confirm; reopen is Ctrl+Shift+T
+**User asked:** Ctrl+Shift+W should close all with a dialog; Ctrl+Shift+T reopens from the stack.
+**Did:** Restored the split: Ctrl+W close one, Ctrl+Shift+W close all (confirm via existing `dialogs.confirm`; mentions unsaved count + Ctrl+Shift+T), Ctrl+Shift+T walk the reopen stack. Menu Close All uses the same confirm. Stack/index restore unchanged.
+**Needs next:** Phase 3 sync spike remains next feature.
+
+### 2026-08-13 — Browser-like close/reopen stack
+**User asked:** Make close/reopen work like a browser stack — Ctrl+W and Ctrl+Shift+W back and forth in sequence.
+**Did:** Ctrl+Shift+W now reopens (was close-all). Ctrl+W still closes. Pair is LIFO: each close remembers strip index + keeps the tab cache so reopen puts the tab back where it was (and with unsaved edits). Repeat Ctrl+Shift+W to walk the stack; Ctrl+W after a reopen closes that tab again. Ctrl+Shift+T stays as a reopen alias. Close All remains on the right-click menu only. [`src/tabClose.ts`](../src/tabClose.ts) `ClosedTab` + `insertTab` + sequence self-check.
+**Needs next:** Phase 3 sync spike remains next feature.
+
+### 2026-08-13 — Tab close menu + reopen shortcut
+**User asked:** Tabs need Close / Close all / Close others / Close to the right / Close saved, enabled only when they make sense, plus shortcuts to close and reopen recently closed (Ctrl+W / Ctrl+Shift+W).
+**Did:** Right-click on any open tab (request, settings, docs, history, env) opens a menu: Close, Close Others, Close to the Right, Close Saved, Close All, Reopen Closed Tab. Disabled when they wouldn't do anything (rightmost → no Close to the Right; single tab → no Close Others; all dirty → no Close Saved; empty stack → no Reopen). [`src/tabClose.ts`](../src/tabClose.ts) owns enablement + id lists + a 20-deep recently-closed stack (focused tab popped first). Shortcuts: Ctrl+W close current, Ctrl+Shift+W close all, Ctrl+Shift+T reopen. Stack is in-memory and cleared on workspace switch; deleting a request does not push it.
+**Needs next:** Phase 3 sync spike remains next feature.
+
+### 2026-08-08 — Read-only history snapshot + inline quick view
+**User asked:** Sidebar history should open a read-only request+response snapshot for debugging; response History icon/tab should keep inline past-response preview with a pop-out to the same full snapshot.
+**Did:** Added `request_json` on `request_history` (+ `get_history`); UI/MCP writers snapshot headers/body/auth/params + resolved URL. New [`src/HistoryDetail.tsx`](../src/HistoryDetail.tsx) tab (`__hist__:<id>`). Sidebar click → snapshot tab only (no `openRequest`/`applyHistoryEntry`). History icon popover + response History tab: row click still `applyHistoryEntry`; ExternalLink pop-out → snapshot tab. Old rows without snapshot show response + hint.
+**Needs next:** Phase 3 sync spike remains next feature.
 
 ### 2026-08-07 — Fix global search bar spaces
 **User asked:** Titlebar search strips spaces (`Get Species` → `GetSpecies`); check other search UIs aren't damaged.

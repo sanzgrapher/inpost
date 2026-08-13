@@ -11,6 +11,8 @@ export type WorkspaceSession = {
   responseHidden: boolean;
   rail: Rail;
   expandedFolders: Record<string, boolean>;
+  /** Collection ids → expanded in the sidebar forest (default true when missing). */
+  expandedCollections: Record<string, boolean>;
   settingsSection: string;
   envViewId: string | null;
   /** Sidebar width in px (collections/env/history tree). */
@@ -64,6 +66,7 @@ export function emptySession(
     responseHidden: false,
     rail: "collections",
     expandedFolders: {},
+    expandedCollections: {},
     settingsSection: "mcp",
     envViewId: null,
     sidebarWidth: SIDEBAR_DEFAULT,
@@ -98,6 +101,14 @@ function normalize(raw: unknown, fallbackDock: LayoutDock): WorkspaceSession {
             Object.entries(o.expandedFolders as Record<string, unknown>).filter(
               ([, v]) => typeof v === "boolean",
             ) as [string, boolean][],
+          )
+        : {},
+    expandedCollections:
+      o.expandedCollections && typeof o.expandedCollections === "object"
+        ? Object.fromEntries(
+            Object.entries(
+              o.expandedCollections as Record<string, unknown>,
+            ).filter(([, v]) => typeof v === "boolean") as [string, boolean][],
           )
         : {},
     settingsSection:
@@ -187,6 +198,7 @@ if (
   s.responseHidden = true;
   s.rail = "history";
   s.expandedFolders = { f1: false };
+  s.expandedCollections = { c1: false };
   s.settingsSection = "ws:xyz";
   s.envViewId = "e1";
   s.sidebarWidth = 320;
@@ -198,6 +210,7 @@ if (
   console.assert(loaded!.openTabs.join(",") === "a,__settings__", "tabs");
   console.assert(loaded!.responseHidden === true, "hidden");
   console.assert(loaded!.rail === "history", "rail");
+  console.assert(loaded!.expandedCollections.c1 === false, "expandedCollections");
   console.assert(loaded!.settingsSection === "ws:xyz", "section");
   console.assert(loaded!.sidebarWidth === 320, "sidebar");
   console.assert(loaded!.splitRatio === 0.35, "split");

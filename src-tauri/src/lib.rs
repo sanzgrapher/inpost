@@ -390,6 +390,14 @@ fn insert_history(
 }
 
 #[tauri::command]
+fn get_history(
+    state: tauri::State<'_, Arc<Db>>,
+    id: String,
+) -> Result<Option<HistoryEntry>, String> {
+    state.get_history(&id)
+}
+
+#[tauri::command]
 fn delete_history(state: tauri::State<'_, Arc<Db>>, id: String) -> Result<(), String> {
     state.delete_history(&id)
 }
@@ -400,6 +408,14 @@ fn clear_request_history(
     request_id: String,
 ) -> Result<(), String> {
     state.clear_request_history(&request_id)
+}
+
+#[tauri::command]
+fn clear_workspace_history(
+    state: tauri::State<'_, Arc<Db>>,
+    workspace_id: String,
+) -> Result<(), String> {
+    state.clear_workspace_history(&workspace_id)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -477,8 +493,10 @@ pub fn run() {
             list_workspace_history,
             list_request_history,
             insert_history,
+            get_history,
             delete_history,
             clear_request_history,
+            clear_workspace_history,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

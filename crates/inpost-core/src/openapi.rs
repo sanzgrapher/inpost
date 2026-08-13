@@ -1,4 +1,10 @@
-//! OpenAPI 3.x import/export — JSON or YAML. Minimal path→request mapping.
+//! OpenAPI 3.x import/export — JSON or YAML.
+//!
+//! Official OpenAPI fields we map:
+//! - `info.title` / `info.description` → collection
+//! - operation `summary` → request name (display); `operationId` is machine id only
+//! - operation `tags` + root `tags` → folders (OpenAPI's grouping primitive)
+//! - nested folders → Tag Object `parent` (OpenAPI 3.2); flat stays 3.0.3
 
 use serde_json::{json, Map, Value};
 
@@ -11,6 +17,15 @@ pub struct ImportedRequest {
     pub headers_json: String,
     pub body: String,
     pub body_type: String,
+    /// First operation tag → Inpost folder (if any).
+    pub folder: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportTag {
+    pub name: String,
+    /// OpenAPI 3.2 Tag Object `parent` (tag name).
+    pub parent: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -18,6 +33,7 @@ pub struct ImportResult {
     pub collection_name: String,
     pub collection_description: String,
     pub base_url: Option<String>,
+    pub tags: Vec<ImportTag>,
     pub requests: Vec<ImportedRequest>,
 }
 
@@ -31,6 +47,14 @@ pub struct ExportRequest {
     pub body: String,
     pub body_type: String,
     pub body_pairs_json: String,
+    /// Folder tag name for this request (None = collection root).
+    pub folder: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExportFolder {
+    pub name: String,
+    pub parent: Option<String>,
 }
 
 const METHODS: &[&str] = &["get", "post", "put", "patch", "delete", "head", "options"];
@@ -60,15 +84,16 @@ fn path_to_url(path: &str) -> String {
     format!("{{{{baseUrl}}}}{path}")
 }
 
+/// Display name: prefer `summary` (human title), then `operationId`, then METHOD path.
 fn op_name(method: &str, path: &str, op: &Value) -> String {
-    if let Some(id) = op.get("operationId").and_then(|v| v.as_str()) {
-        if !id.is_empty() {
-            return id.to_string();
-        }
-    }
     if let Some(sum) = op.get("summary").and_then(|v| v.as_str()) {
         if !sum.is_empty() {
             return sum.to_string();
+        }
+    }
+    if let Some(id) = op.get("operationId").and_then(|v| v.as_str()) {
+        if !id.is_empty() {
+            return id.to_string();
         }
     }
     format!("{} {}", method.to_uppercase(), path)
@@ -79,6 +104,43 @@ fn op_description(op: &Value) -> String {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string()
+}
+
+fn op_folder(op: &Value) -> Option<String> {
+    op.get("tags")
+        .and_then(|t| t.as_array())
+        .and_then(|a| a.first())
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+fn root_tags(spec: &Value) -> Vec<ImportTag> {
+    let Some(arr) = spec.get("tags").and_then(|t| t.as_array()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for t in arr {
+        let Some(name) = t.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let parent = t
+            .get("parent")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+        out.push(ImportTag {
+            name: name.to_string(),
+            parent,
+        });
+    }
+    out
 }
 
 fn headers_from_op(op: &Value) -> String {
@@ -151,7 +213,7 @@ fn body_example(media: &Value) -> String {
     String::new()
 }
 
-/// Import OpenAPI 3.x (or Swagger-ish paths) into a flat request list.
+/// Import OpenAPI 3.x (or Swagger-ish paths) into a request list (+ optional tag folders).
 pub fn import_openapi(text: &str) -> Result<ImportResult, String> {
     let spec = parse_spec(text)?;
     let collection_name = spec
@@ -166,6 +228,7 @@ pub fn import_openapi(text: &str) -> Result<ImportResult, String> {
         .unwrap_or("")
         .to_string();
     let base_url = server_url(&spec);
+    let tags = root_tags(&spec);
     let paths = spec
         .get("paths")
         .and_then(|p| p.as_object())
@@ -192,6 +255,7 @@ pub fn import_openapi(text: &str) -> Result<ImportResult, String> {
                 headers_json: headers_from_op(op),
                 body,
                 body_type,
+                folder: op_folder(op),
             });
         }
     }
@@ -202,17 +266,20 @@ pub fn import_openapi(text: &str) -> Result<ImportResult, String> {
         collection_name,
         collection_description,
         base_url,
+        tags,
         requests,
     })
 }
 
-/// Export requests as OpenAPI 3.0.3 JSON string.
+/// Export requests as OpenAPI JSON (`3.0.3`, or `3.2.0` when any folder has a parent).
 pub fn export_openapi(
     collection_name: &str,
     collection_description: &str,
     requests: &[ExportRequest],
+    folders: &[ExportFolder],
 ) -> Result<String, String> {
     let mut paths: Map<String, Value> = Map::new();
+    let nested = folders.iter().any(|f| f.parent.is_some());
 
     for req in requests {
         let (base, path) = split_url_path(&req.url);
@@ -232,6 +299,9 @@ pub fn export_openapi(
         op.insert("summary".into(), json!(req.name));
         if !req.description.trim().is_empty() {
             op.insert("description".into(), json!(req.description));
+        }
+        if let Some(tag) = req.folder.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            op.insert("tags".into(), json!([tag]));
         }
 
         if let Ok(headers) = serde_json::from_str::<Vec<(String, String)>>(&req.headers_json) {
@@ -268,13 +338,30 @@ pub fn export_openapi(
     if !collection_description.trim().is_empty() {
         info.insert("description".into(), json!(collection_description));
     }
-    let doc = json!({
-        "openapi": "3.0.3",
-        "info": Value::Object(info),
-        "servers": [{ "url": "{{baseUrl}}" }],
-        "paths": paths
-    });
-    serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())
+
+    let mut doc = Map::new();
+    doc.insert(
+        "openapi".into(),
+        json!(if nested { "3.2.0" } else { "3.0.3" }),
+    );
+    doc.insert("info".into(), Value::Object(info));
+    doc.insert("servers".into(), json!([{ "url": "{{baseUrl}}" }]));
+    if !folders.is_empty() {
+        let tags: Vec<Value> = folders
+            .iter()
+            .map(|f| {
+                let mut t = Map::new();
+                t.insert("name".into(), json!(f.name));
+                if let Some(p) = f.parent.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                    t.insert("parent".into(), json!(p));
+                }
+                Value::Object(t)
+            })
+            .collect();
+        doc.insert("tags".into(), Value::Array(tags));
+    }
+    doc.insert("paths".into(), Value::Object(paths));
+    serde_json::to_string_pretty(&Value::Object(doc)).map_err(|e| e.to_string())
 }
 
 /// Build a `requestBody` object matching the request's body type, or `None`.
@@ -345,7 +432,10 @@ fn split_url_path(url: &str) -> (String, String) {
     if let Some(idx) = u.find("://") {
         let after = &u[idx + 3..];
         if let Some(slash) = after.find('/') {
-            return (u[..idx + 3 + slash].to_string(), normalize_path(&after[slash..]));
+            return (
+                u[..idx + 3 + slash].to_string(),
+                normalize_path(&after[slash..]),
+            );
         }
         return (u.to_string(), "/".into());
     }
@@ -383,9 +473,15 @@ mod tests {
       "openapi": "3.0.3",
       "info": { "title": "Pet Store", "description": "The pet store API." },
       "servers": [{ "url": "https://api.example.com" }],
+      "tags": [{ "name": "Pets" }],
       "paths": {
         "/pets": {
-          "get": { "operationId": "listPets", "summary": "List pets", "description": "Returns all pets." },
+          "get": {
+            "operationId": "listPets",
+            "summary": "List pets",
+            "description": "Returns all pets.",
+            "tags": ["Pets"]
+          },
           "post": {
             "operationId": "createPet",
             "requestBody": {
@@ -412,12 +508,18 @@ mod tests {
             imported.base_url.as_deref(),
             Some("https://api.example.com")
         );
+        assert_eq!(imported.tags.len(), 1);
+        assert_eq!(imported.tags[0].name, "Pets");
         assert_eq!(imported.requests.len(), 3);
+        // summary wins over operationId for display name
         assert!(imported
             .requests
             .iter()
-            .any(|r| r.name == "listPets" && r.description == "Returns all pets."));
-        assert!(imported.requests.iter().any(|r| r.method == "GET" && r.url.contains("/pets")));
+            .any(|r| r.name == "List pets" && r.description == "Returns all pets." && r.folder.as_deref() == Some("Pets")));
+        assert!(imported
+            .requests
+            .iter()
+            .any(|r| r.method == "GET" && r.url.contains("/pets")));
         assert!(imported
             .requests
             .iter()
@@ -439,24 +541,38 @@ mod tests {
                 body: r.body.clone(),
                 body_type: r.body_type.clone(),
                 body_pairs_json: "[]".into(),
+                folder: r.folder.clone(),
             })
             .collect();
-        let out = export_openapi("Pet Store", "The pet store API.", &export_reqs).expect("export");
+        let folders = vec![ExportFolder {
+            name: "Pets".into(),
+            parent: None,
+        }];
+        let out =
+            export_openapi("Pet Store", "The pet store API.", &export_reqs, &folders).expect("export");
         let v: Value = serde_json::from_str(&out).expect("json");
         assert_eq!(v["openapi"], "3.0.3");
         assert_eq!(v["info"]["description"], "The pet store API.");
+        assert_eq!(v["tags"][0]["name"], "Pets");
+        assert_eq!(v["paths"]["/pets"]["get"]["summary"], "List pets");
+        assert_eq!(v["paths"]["/pets"]["get"]["tags"][0], "Pets");
         assert!(v["paths"]["/pets"]["get"].is_object());
         assert!(v["paths"]["/pets"]["post"].is_object());
-        // Operation description round-trips.
         assert_eq!(
             v["paths"]["/pets"]["get"]["description"],
             "Returns all pets."
         );
-        // JSON body round-trips as application/json requestBody.
         assert!(
             v["paths"]["/pets"]["post"]["requestBody"]["content"]["application/json"]
                 .is_object()
         );
+
+        // Full round-trip: re-import exported doc keeps summary name + folder
+        let again = import_openapi(&out).expect("reimport");
+        assert!(again
+            .requests
+            .iter()
+            .any(|r| r.name == "List pets" && r.folder.as_deref() == Some("Pets")));
     }
 
     #[test]
@@ -470,8 +586,9 @@ mod tests {
             body: String::new(),
             body_type: "urlencoded".into(),
             body_pairs_json: r#"[["name","Ada"],["role","dev"]]"#.into(),
+            folder: None,
         }];
-        let out = export_openapi("Forms", "", &reqs).expect("export");
+        let out = export_openapi("Forms", "", &reqs, &[]).expect("export");
         let v: Value = serde_json::from_str(&out).expect("json");
         let ct = &v["paths"]["/form"]["post"]["requestBody"]["content"];
         assert!(ct["application/x-www-form-urlencoded"]["schema"]["properties"]["name"].is_object());
@@ -479,6 +596,40 @@ mod tests {
             ct["application/x-www-form-urlencoded"]["example"]["role"],
             "dev"
         );
+    }
+
+    #[test]
+    fn nested_folder_uses_openapi_32_parent() {
+        let reqs = vec![ExportRequest {
+            name: "Child op".into(),
+            description: String::new(),
+            method: "GET".into(),
+            url: "{{baseUrl}}/x".into(),
+            headers_json: "[]".into(),
+            body: String::new(),
+            body_type: "none".into(),
+            body_pairs_json: "[]".into(),
+            folder: Some("Child".into()),
+        }];
+        let folders = vec![
+            ExportFolder {
+                name: "Parent".into(),
+                parent: None,
+            },
+            ExportFolder {
+                name: "Child".into(),
+                parent: Some("Parent".into()),
+            },
+        ];
+        let out = export_openapi("Nest", "", &reqs, &folders).expect("export");
+        let v: Value = serde_json::from_str(&out).expect("json");
+        assert_eq!(v["openapi"], "3.2.0");
+        assert_eq!(v["tags"][1]["name"], "Child");
+        assert_eq!(v["tags"][1]["parent"], "Parent");
+        let again = import_openapi(&out).expect("reimport");
+        assert_eq!(again.tags[1].parent.as_deref(), Some("Parent"));
+        assert_eq!(again.requests[0].folder.as_deref(), Some("Child"));
+        assert_eq!(again.requests[0].name, "Child op");
     }
 
     #[test]
@@ -495,5 +646,6 @@ paths:
         let imported = import_openapi(yaml).expect("yaml");
         assert_eq!(imported.collection_name, "YAML API");
         assert_eq!(imported.requests.len(), 1);
+        assert_eq!(imported.requests[0].name, "health");
     }
 }

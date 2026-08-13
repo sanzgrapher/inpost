@@ -552,6 +552,29 @@ fn run_request(
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
+        let request_json = |resolved: &str| {
+            Some(
+                serde_json::json!({
+                    "urlTemplate": req.url,
+                    "resolvedUrl": resolved,
+                    "headers": serde_json::from_str::<serde_json::Value>(&req.headers_json)
+                        .unwrap_or_else(|_| serde_json::json!([])),
+                    "body": if req.body.is_empty() {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::Value::String(req.body.clone())
+                    },
+                    "bodyType": req.body_type,
+                    "bodyPairs": serde_json::from_str::<serde_json::Value>(&req.body_pairs_json)
+                        .unwrap_or_else(|_| serde_json::json!([])),
+                    "authType": req.auth_type,
+                    "authJson": req.auth_json,
+                    "pathVars": serde_json::from_str::<serde_json::Value>(&req.path_vars_json)
+                        .unwrap_or_else(|_| serde_json::json!([])),
+                })
+                .to_string(),
+            )
+        };
         let entry = match &result {
             Ok(r) => HistoryEntry {
                 id: String::new(),
@@ -567,6 +590,7 @@ fn run_request(
                 body: Some(r.body.clone()),
                 body_pretty: r.body_pretty.clone(),
                 headers_json: Some(serde_json::to_string(&r.headers).unwrap_or_else(|_| "[]".into())),
+                request_json: request_json(&r.resolved_url),
                 created_at,
             },
             Err(e) => HistoryEntry {
@@ -583,6 +607,7 @@ fn run_request(
                 body: None,
                 body_pretty: None,
                 headers_json: None,
+                request_json: request_json(&req.url),
                 created_at,
             },
         };
