@@ -21406,20 +21406,31 @@ function registerTools(server2) {
   );
   server2.tool(
     "list_environments",
-    "List environments (including Global)",
-    {},
-    async () => toolText(await bridge("GET", "/v1/environments"))
+    "List environments in a workspace (including that workspace's Global)",
+    { workspaceId: external_exports.string().min(1) },
+    async ({ workspaceId }) => toolText(
+      await bridge(
+        "GET",
+        `/v1/environments?workspaceId=${encodeURIComponent(workspaceId)}`
+      )
+    )
   );
   server2.tool(
     "get_active_environment",
-    "Get the active (non-global) environment",
-    {},
-    async () => toolText(await bridge("GET", "/v1/environments/active"))
+    "Get the active (non-global) environment for a workspace",
+    { workspaceId: external_exports.string().min(1) },
+    async ({ workspaceId }) => toolText(
+      await bridge(
+        "GET",
+        `/v1/environments/active?workspaceId=${encodeURIComponent(workspaceId)}`
+      )
+    )
   );
   server2.tool(
     "create_environment",
-    "Create an environment",
+    "Create an environment in a workspace",
     {
+      workspaceId: external_exports.string().min(1),
       name: external_exports.string().min(1).max(200),
       varsJson: external_exports.string().optional(),
       isActive: external_exports.boolean().optional()
@@ -21428,6 +21439,7 @@ function registerTools(server2) {
       const env = {
         id: crypto.randomUUID(),
         name: args.name,
+        workspaceId: args.workspaceId,
         isGlobal: false,
         isActive: args.isActive ?? true,
         varsJson: args.varsJson ?? "{}"
@@ -21440,6 +21452,7 @@ function registerTools(server2) {
     "Update environment name/vars/active flags",
     {
       environmentId: external_exports.string().min(1),
+      workspaceId: external_exports.string().min(1),
       name: external_exports.string().min(1).max(200),
       varsJson: external_exports.string(),
       isGlobal: external_exports.boolean().optional(),
@@ -21449,6 +21462,7 @@ function registerTools(server2) {
       const env = {
         id: args.environmentId,
         name: args.name,
+        workspaceId: args.workspaceId,
         isGlobal: args.isGlobal ?? false,
         isActive: args.isActive ?? false,
         varsJson: args.varsJson
@@ -21489,6 +21503,46 @@ function registerTools(server2) {
         environmentId: environmentId ?? null
       })
     )
+  );
+  server2.tool(
+    "get_history",
+    "Fetch one history snapshot by id (from UI Copy ID or list_workspace_history / list_request_history). Returns request+response snapshot including requestJson.",
+    { historyId: external_exports.string().min(1) },
+    async ({ historyId }) => toolText(await bridge("GET", `/v1/history/${encodeURIComponent(historyId)}`))
+  );
+  server2.tool(
+    "list_workspace_history",
+    "List recent request run history for a workspace (newest first). Use get_history with an entry id for the full snapshot.",
+    {
+      workspaceId: external_exports.string().min(1),
+      limit: external_exports.number().int().min(1).max(200).optional()
+    },
+    async ({ workspaceId, limit }) => {
+      const q = limit != null ? `?limit=${encodeURIComponent(String(limit))}` : "";
+      return toolText(
+        await bridge(
+          "GET",
+          `/v1/workspaces/${encodeURIComponent(workspaceId)}/history${q}`
+        )
+      );
+    }
+  );
+  server2.tool(
+    "list_request_history",
+    "List recent run history for one saved request (newest first). Use get_history with an entry id for the full snapshot.",
+    {
+      requestId: external_exports.string().min(1),
+      limit: external_exports.number().int().min(1).max(100).optional()
+    },
+    async ({ requestId, limit }) => {
+      const q = limit != null ? `?limit=${encodeURIComponent(String(limit))}` : "";
+      return toolText(
+        await bridge(
+          "GET",
+          `/v1/requests/${encodeURIComponent(requestId)}/history${q}`
+        )
+      );
+    }
   );
   server2.tool(
     "import_openapi",

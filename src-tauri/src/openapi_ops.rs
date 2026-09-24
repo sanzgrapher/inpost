@@ -56,7 +56,7 @@ pub fn import_into_db(
         })?;
     }
     if let Some(base) = &imported.base_url {
-        if let Ok(envs) = db.list_environments() {
+        if let Ok(envs) = db.list_environments(Some(workspace_id.to_string())) {
             if let Some(mut active) = envs.into_iter().find(|e| e.is_active && !e.is_global) {
                 let mut vars: HashMap<String, String> =
                     serde_json::from_str(&active.vars_json).unwrap_or_default();

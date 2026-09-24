@@ -1253,6 +1253,8 @@ textarea {
   min-height: 32px;
   background: #eef0f3;
   border-bottom: 1px solid var(--border);
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .opentabs-scroll {
@@ -1262,6 +1264,8 @@ textarea {
   overflow-x: auto;
   /* Browser-style: no visible scrollbar; wheel/trackpad + auto-scroll instead. */
   scrollbar-width: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .opentabs-scroll::-webkit-scrollbar {
@@ -1281,6 +1285,8 @@ textarea {
   color: var(--muted);
   white-space: nowrap;
   flex-shrink: 0;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .opentab:hover {
@@ -1294,10 +1300,44 @@ textarea {
   box-shadow: inset 0 -2px 0 var(--accent);
 }
 
+.opentab.dragging {
+  opacity: 0.92;
+  z-index: 3;
+  position: relative;
+  transition: none !important;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.14);
+  background: var(--surface);
+}
+
+body.opentab-reordering {
+  cursor: grabbing;
+  user-select: none;
+}
+
+body.opentab-reordering * {
+  cursor: grabbing !important;
+  user-select: none !important;
+}
+
+body.opentab-reordering .opentab:not(.dragging) {
+  will-change: transform;
+}
+
 .opentab-name {
   overflow: hidden;
   text-overflow: ellipsis;
   font-weight: 500;
+}
+
+.opentab-hist-mark {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--muted);
+  line-height: 0;
+}
+
+.opentab.active .opentab-hist-mark {
+  color: var(--accent);
 }
 
 .opentab-dirty {
@@ -1862,6 +1902,16 @@ textarea {
   box-shadow: 0 0 0 2px var(--accent-soft);
 }
 
+.url-field.read-only {
+  background: var(--bg);
+  cursor: default;
+}
+
+.url-field.read-only .url-field-input {
+  cursor: default;
+  caret-color: transparent;
+}
+
 .url-field-mirror,
 .url-field-hit,
 .url-field-input {
@@ -2289,6 +2339,14 @@ textarea {
 
 .url-bar .ui-btn.send {
   min-width: 64px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.history-detail .url-bar .ui-btn.send {
+  min-width: 0;
+  padding-inline: 12px;
 }
 
 .editor-split {
@@ -4347,11 +4405,18 @@ body.sash-dragging .sidebar {
   list-style: none;
 }
 
+.history-row {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+}
+
 .history-list .history-entry {
   display: flex;
   align-items: flex-start;
   gap: 6px;
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   min-height: 40px;
   padding: 6px 8px;
   border: none;
@@ -4360,7 +4425,32 @@ body.sash-dragging .sidebar {
   text-align: left;
   cursor: pointer;
   color: var(--text);
-  min-width: 0;
+}
+
+.history-row .history-copy-id {
+  flex: 0 0 auto;
+  width: 28px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  padding: 0;
+  opacity: 0;
+  font-size: 12px;
+}
+
+.history-row:hover .history-copy-id,
+.history-row .history-copy-id:focus-visible {
+  opacity: 1;
+}
+
+.history-row .history-copy-id:hover {
+  background: rgba(15, 23, 42, 0.06);
+  color: var(--text);
 }
 
 .history-list .history-entry:hover {
@@ -4426,129 +4516,56 @@ body.sash-dragging .sidebar {
   color: #dc2626;
 }
 
-/* Read-only history snapshot tab */
+/* Read-only history snapshot — same chrome classes as playground */
 .history-detail {
   display: flex;
   flex-direction: column;
   height: 100%;
   min-height: 0;
-  overflow: auto;
+  overflow: hidden;
   background: var(--bg);
 }
 
-.history-detail-head {
-  flex: 0 0 auto;
-  padding: 12px 16px 10px;
-  border-bottom: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.history-detail-title-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-.history-detail-title {
-  margin: 0;
-  font-size: 14px;
-  font-weight: 600;
-  flex: 1;
-  min-width: 0;
-}
-
-.history-detail-meta {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-  font-size: 12px;
-  color: var(--muted);
-}
-
-.history-detail-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0;
+.history-detail > .editor-split {
   flex: 1;
   min-height: 0;
+  border-top: 1px solid var(--border);
 }
 
-@media (max-width: 900px) {
-  .history-detail-grid {
-    grid-template-columns: 1fr;
-  }
-}
-
-.history-detail-pane {
-  padding: 12px 16px 20px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  min-width: 0;
-  border-right: 1px solid var(--border);
-}
-
-.history-detail-pane:last-child {
-  border-right: none;
-}
-
-.history-detail-pane h3 {
-  margin: 0 0 4px;
-  font-size: 12px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--muted);
-}
-
-.history-detail-label {
-  margin-top: 8px;
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--muted);
-}
-
-.history-detail-url {
-  display: block;
-  font-size: 12px;
-  word-break: break-all;
-  padding: 6px 8px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-}
-
-.history-detail-url.muted {
-  color: var(--muted);
-}
-
-.history-detail-empty {
-  font-size: 12px;
-  color: var(--muted);
-  padding: 4px 0;
-}
-
-.history-detail-hint {
-  margin: 0 0 8px;
+.history-detail-hint.banner {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 8px 12px;
   font-size: 12px;
   color: var(--muted);
   line-height: 1.4;
+  border-bottom: 1px solid var(--border);
+  background: #fffbeb;
+}
+
+.body-type-opt:has(input:disabled) {
+  cursor: default;
+  opacity: 0.85;
 }
 
 .history-detail-editor {
-  min-height: 160px;
-  height: 240px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  flex: 1;
+  min-height: 0;
   overflow: hidden;
+  border: none;
+  border-radius: 0;
 }
 
 .history-detail-error {
-  margin-top: 4px;
+  margin: 12px;
+}
+
+.history-crumb-title {
+  cursor: default;
+}
+
+.history-crumb-title:hover {
+  background: transparent;
 }
 
 .req-history-row {
@@ -4767,7 +4784,8 @@ body.sash-dragging .sidebar {
   padding: 6px 12px;
 }
 
-.response-pane > .kv-table.read-only {
+.response-pane > .kv-table.read-only,
+.response-pane > .kv-table {
   flex: 1;
   min-height: 0;
   overflow: auto;

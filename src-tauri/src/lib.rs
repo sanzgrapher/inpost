@@ -144,8 +144,11 @@ fn delete_request(state: tauri::State<'_, Arc<Db>>, id: String) -> Result<(), St
 }
 
 #[tauri::command]
-fn list_environments(state: tauri::State<'_, Arc<Db>>) -> Result<Vec<Environment>, String> {
-    state.list_environments()
+fn list_environments(
+    state: tauri::State<'_, Arc<Db>>,
+    workspace_id: Option<String>,
+) -> Result<Vec<Environment>, String> {
+    state.list_environments(workspace_id)
 }
 
 #[tauri::command]
@@ -180,8 +183,9 @@ fn send_http_request(input: SendRequestInput) -> Result<SendRequestResult, Strin
 #[tauri::command]
 fn resolve_env_maps(
     state: tauri::State<'_, Arc<Db>>,
+    workspace_id: String,
 ) -> Result<(HashMap<String, String>, HashMap<String, String>), String> {
-    let envs = state.list_environments()?;
+    let envs = state.list_environments(Some(workspace_id))?;
     let mut active = HashMap::new();
     let mut global = HashMap::new();
     for e in envs {

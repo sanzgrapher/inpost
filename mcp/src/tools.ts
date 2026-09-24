@@ -23,6 +23,7 @@ type RequestRow = {
 type EnvRow = {
   id: string;
   name: string;
+  workspaceId: string;
   isGlobal: boolean;
   isActive: boolean;
   varsJson: string;
@@ -311,22 +312,35 @@ export function registerTools(server: McpServer) {
 
   server.tool(
     "list_environments",
-    "List environments (including Global)",
-    {},
-    async () => toolText(await bridge("GET", "/v1/environments")),
+    "List environments in a workspace (including that workspace's Global)",
+    { workspaceId: z.string().min(1) },
+    async ({ workspaceId }) =>
+      toolText(
+        await bridge(
+          "GET",
+          `/v1/environments?workspaceId=${encodeURIComponent(workspaceId)}`,
+        ),
+      ),
   );
 
   server.tool(
     "get_active_environment",
-    "Get the active (non-global) environment",
-    {},
-    async () => toolText(await bridge("GET", "/v1/environments/active")),
+    "Get the active (non-global) environment for a workspace",
+    { workspaceId: z.string().min(1) },
+    async ({ workspaceId }) =>
+      toolText(
+        await bridge(
+          "GET",
+          `/v1/environments/active?workspaceId=${encodeURIComponent(workspaceId)}`,
+        ),
+      ),
   );
 
   server.tool(
     "create_environment",
-    "Create an environment",
+    "Create an environment in a workspace",
     {
+      workspaceId: z.string().min(1),
       name: z.string().min(1).max(200),
       varsJson: z.string().optional(),
       isActive: z.boolean().optional(),
@@ -335,6 +349,7 @@ export function registerTools(server: McpServer) {
       const env: EnvRow = {
         id: crypto.randomUUID(),
         name: args.name,
+        workspaceId: args.workspaceId,
         isGlobal: false,
         isActive: args.isActive ?? true,
         varsJson: args.varsJson ?? "{}",
@@ -348,6 +363,7 @@ export function registerTools(server: McpServer) {
     "Update environment name/vars/active flags",
     {
       environmentId: z.string().min(1),
+      workspaceId: z.string().min(1),
       name: z.string().min(1).max(200),
       varsJson: z.string(),
       isGlobal: z.boolean().optional(),
@@ -357,6 +373,7 @@ export function registerTools(server: McpServer) {
       const env: EnvRow = {
         id: args.environmentId,
         name: args.name,
+        workspaceId: args.workspaceId,
         isGlobal: args.isGlobal ?? false,
         isActive: args.isActive ?? false,
         varsJson: args.varsJson,
@@ -404,6 +421,56 @@ export function registerTools(server: McpServer) {
           environmentId: environmentId ?? null,
         }),
       ),
+  );
+
+  server.tool(
+    "get_history",
+    "Fetch one history snapshot by id (from UI Copy ID or list_workspace_history / list_request_history). Returns request+response snapshot including requestJson.",
+    { historyId: z.string().min(1) },
+    async ({ historyId }) =>
+      toolText(await bridge("GET", `/v1/history/${encodeURIComponent(historyId)}`)),
+  );
+
+  server.tool(
+    "list_workspace_history",
+    "List recent request run history for a workspace (newest first). Use get_history with an entry id for the full snapshot.",
+    {
+      workspaceId: z.string().min(1),
+      limit: z.number().int().min(1).max(200).optional(),
+    },
+    async ({ workspaceId, limit }) => {
+      const q =
+        limit != null
+          ? `?limit=${encodeURIComponent(String(limit))}`
+          : "";
+      return toolText(
+        await bridge(
+          "GET",
+          `/v1/workspaces/${encodeURIComponent(workspaceId)}/history${q}`,
+        ),
+      );
+    },
+  );
+
+  server.tool(
+    "list_request_history",
+    "List recent run history for one saved request (newest first). Use get_history with an entry id for the full snapshot.",
+    {
+      requestId: z.string().min(1),
+      limit: z.number().int().min(1).max(100).optional(),
+    },
+    async ({ requestId, limit }) => {
+      const q =
+        limit != null
+          ? `?limit=${encodeURIComponent(String(limit))}`
+          : "";
+      return toolText(
+        await bridge(
+          "GET",
+          `/v1/requests/${encodeURIComponent(requestId)}/history${q}`,
+        ),
+      );
+    },
   );
 
   server.tool(

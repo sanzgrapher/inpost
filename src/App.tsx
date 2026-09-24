@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -9,6 +9,7 @@ import {
   ChevronDown,
   ChevronRight,
   ChevronUp,
+  Copy,
   FileUp,
   Folder,
   FolderPlus,
@@ -36,29 +37,32 @@ import { DocArticle } from "./Docs";
 import { GlobalSearch } from "./GlobalSearch";
 import { HistoryDetail } from "./HistoryDetail";
 import { methodClass, methodLabel } from "./methodStyle";
+import { PairTable, type Pair } from "./PairTable";
+import { RequestChrome } from "./RequestChrome";
 import {
   type IndexItem,
 } from "./searchQuery";
-import { UrlField } from "./UrlField";
 import { VarField, type EnvVarHoverProps } from "./EnvVarHover";
 import { SHORTCUTS, isInspectKey, matchShortcut, nextInCycle, type ShortcutAction } from "./shortcuts";
 import {
   entriesToClose,
   idsToClose,
   insertTab,
+  moveTabIndex,
   popClosed,
   pushClosed,
   tabCloseEnabled,
+  tabSiblingShift,
   type ClosedTab,
   type TabCloseAction,
 } from "./tabClose";
-import { Button, Modal, Select, SuggestInput, useDialogs } from "./ui";
+import { Button, Modal, Select, useDialogs } from "./ui";
 import {
   sourceKeys,
   syncSelectedVars,
   uniqueEnvName,
 } from "./envSync";
-import { encodeQueryPart, pairsToMap, resolveRequestUrl } from "./envVar";
+import { encodeQueryPart, pairsToMap, resolveRequestUrl, substituteInPairsJson, substituteVars } from "./envVar";
 import { diffTokens } from "./envSync";
 import {
   AUTH_TYPE_OPTIONS,
@@ -141,6 +145,7 @@ type TreeSibling = { kind: TreeKind; id: string; name: string; sortOrder: number
 type Environment = {
   id: string;
   name: string;
+  workspaceId: string;
   isGlobal: boolean;
   isActive: boolean;
   varsJson: string;
@@ -153,14 +158,6 @@ type SendResult = {
   bodyPretty: string | null;
   elapsedMs: number;
   resolvedUrl: string;
-};
-type Pair = {
-  key: string;
-  value: string;
-  enabled?: boolean;
-  /** Multipart part kind — ignored for headers/query/path. */
-  type?: "text" | "file";
-  description?: string;
 };
 type HistoryEntry = {
   id: string;
@@ -333,8 +330,6 @@ function asSettingsSection(v: string): SettingsSection {
   if (v.startsWith(WS_SETTINGS_PREFIX)) return v as SettingsSection;
   return "mcp";
 }
-
-const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
 
 function folderPath(
   folderId: string | null | undefined,
@@ -749,255 +744,6 @@ function historyMeta(h: HistoryEntry) {
   if (h.elapsedMs != null) parts.push(`${h.elapsedMs} ms`);
   if (h.sizeBytes != null) parts.push(formatBytes(h.sizeBytes));
   return parts.join(" · ") || "—";
-}
-
-function PairTable({
-  pairs,
-  onChange,
-  keyLabel = "Key",
-  filter = "",
-  keySuggestions,
-  lockKeys = false,
-  tools = false,
-  envHover,
-}: {
-  pairs: Pair[];
-  onChange: (next: Pair[]) => void;
-  keyLabel?: string;
-  /** Display filter only — edits still target full list indices. */
-  filter?: string;
-  keySuggestions?: string[];
-  /** Path params: keys are derived from the URL, not editable. */
-  lockKeys?: boolean;
-  /** Params table actions: description column + bulk key:value editor. */
-  tools?: boolean;
-  /** Hover-edit `{{vars}}` in the Value column. */
-  envHover?: EnvVarHoverProps;
-}) {
-  const [showDescription, setShowDescription] = useState(false);
-  const [menuOpen, setMenuOpen] = useState(false);
-  const [bulkOpen, setBulkOpen] = useState(false);
-  const [bulkDraft, setBulkDraft] = useState("");
-  const toolsRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!menuOpen) return;
-    function onDoc(e: MouseEvent) {
-      if (toolsRef.current && !toolsRef.current.contains(e.target as Node)) {
-        setMenuOpen(false);
-      }
-    }
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
-  }, [menuOpen]);
-
-  function update(i: number, patch: Partial<Pair>) {
-    const next = pairs.map((p, idx) => (idx === i ? { ...p, ...patch } : p));
-    if (!lockKeys) {
-      const last = next[next.length - 1];
-      if (last && (last.key || last.value)) {
-        next.push({ key: "", value: "", enabled: true });
-      }
-    }
-    onChange(next);
-  }
-
-  function remove(i: number) {
-    if (lockKeys) return;
-    const next = pairs.filter((_, idx) => idx !== i);
-    onChange(
-      next.length ? next : [{ key: "", value: "", enabled: true }],
-    );
-  }
-
-  const q = filter.trim().toLowerCase();
-  const rowClass = `kv-row${showDescription ? " has-description" : ""}`;
-
-  function openBulk() {
-    setBulkDraft(
-      pairs
-        .filter((p) => p.key || p.value)
-        .map((p) => `${p.key}:${p.value}`)
-        .join("\n"),
-    );
-    setBulkOpen(true);
-  }
-
-  function applyBulk() {
-    const next = bulkDraft
-      .split(/\r?\n/)
-      .filter((line) => line.trim())
-      .map((line): Pair => {
-        const colon = line.indexOf(":");
-        return {
-          key: (colon < 0 ? line : line.slice(0, colon)).trim(),
-          value: colon < 0 ? "" : line.slice(colon + 1).trim(),
-          enabled: true,
-        };
-      });
-    onChange([...next, { key: "", value: "", enabled: true }]);
-    setBulkOpen(false);
-  }
-
-  return (
-    <div className={`kv-table${tools ? " has-tools" : ""}`}>
-      {tools && (
-        <div className="kv-toolbar" ref={toolsRef}>
-          <button
-            type="button"
-            className="kv-more"
-            aria-label="Table options"
-            aria-expanded={menuOpen}
-            onClick={() => setMenuOpen((v) => !v)}
-          >
-            <MoreHorizontal {...Ism} />
-          </button>
-          {menuOpen && (
-            <div className="kv-tools-menu">
-              <label>
-                <input
-                  type="checkbox"
-                  checked={showDescription}
-                  onChange={(e) => setShowDescription(e.target.checked)}
-                />
-                Description
-              </label>
-            </div>
-          )}
-          {!lockKeys && (
-            <button type="button" className="kv-bulk-btn" onClick={openBulk}>
-              Bulk edit
-            </button>
-          )}
-        </div>
-      )}
-      <div className={`kv-head${showDescription ? " has-description" : ""}`}>
-        <span />
-        <span>{keyLabel}</span>
-        <span>Value</span>
-        {showDescription && <span>Description</span>}
-        <span />
-      </div>
-      {bulkOpen && (
-        <div className="kv-bulk">
-          <div className="kv-bulk-head">
-            <span>Bulk edit as key:value pairs</span>
-            <button
-              type="button"
-              className="icon-btn"
-              aria-label="Close bulk edit"
-              onClick={() => setBulkOpen(false)}
-            >
-              <X {...Ism} />
-            </button>
-          </div>
-          <textarea
-            value={bulkDraft}
-            autoFocus
-            placeholder={"page:1\nlimit:20"}
-            onChange={(e) => setBulkDraft(e.target.value)}
-          />
-          <div className="kv-bulk-actions">
-            <Button size="sm" onClick={() => setBulkOpen(false)}>
-              Cancel
-            </Button>
-            <Button size="sm" variant="primary" onClick={applyBulk}>
-              Apply
-            </Button>
-          </div>
-        </div>
-      )}
-      {pairs.map((p, i) => {
-        const isLast = i === pairs.length - 1 && !p.key && !p.value;
-        if (
-          q &&
-          !isLast &&
-          !p.key.toLowerCase().includes(q) &&
-          !p.value.toLowerCase().includes(q)
-        ) {
-          return null;
-        }
-        return (
-        <div className={rowClass} key={lockKeys ? p.key : i}>
-          <input
-            type="checkbox"
-            checked={p.enabled !== false}
-            onChange={(e) => update(i, { enabled: e.target.checked })}
-            aria-label="Enable row"
-            disabled={lockKeys}
-          />
-          {keySuggestions?.length && !lockKeys ? (
-            <SuggestInput
-              placeholder={keyLabel}
-              value={p.key}
-              suggestions={keySuggestions}
-              onChange={(key) => update(i, { key })}
-            />
-          ) : (
-            <input
-              placeholder={keyLabel}
-              value={p.key}
-              readOnly={lockKeys}
-              onChange={(e) => update(i, { key: e.target.value })}
-            />
-          )}
-          {envHover ? (
-            <VarField
-              value={p.value}
-              placeholder="Value"
-              env={envHover.env}
-              envPairs={envHover.envPairs}
-              globalPairs={envHover.globalPairs}
-              onSaveVar={envHover.onSaveVar}
-              onOpenEnv={envHover.onOpenEnv}
-              onChange={(value) => update(i, { value })}
-            />
-          ) : (
-            <input
-              placeholder="Value"
-              value={p.value}
-              onChange={(e) => update(i, { value: e.target.value })}
-            />
-          )}
-          {showDescription && (
-            <input
-              placeholder="Description"
-              value={p.description ?? ""}
-              onChange={(e) => update(i, { description: e.target.value })}
-            />
-          )}
-          {!lockKeys ? (
-            <button
-              type="button"
-              className="icon-btn"
-              onClick={() => remove(i)}
-              aria-label="Remove"
-            >
-              <X {...Ism} />
-            </button>
-          ) : (
-            <span />
-          )}
-        </div>
-        );
-      })}
-      {lockKeys ? (
-        pairs.length === 0 && (
-          <div className="kv-empty muted">No path variables in URL</div>
-        )
-      ) : (
-        <button
-          type="button"
-          className="link-btn"
-          onClick={() =>
-            onChange([...pairs, { key: "", value: "", enabled: true }])
-          }
-        >
-          <Plus {...Ism} /> Add more
-        </button>
-      )}
-    </div>
-  );
 }
 
 /** Boxy multipart/form-data editor — Text | File parts in card rows. */
@@ -2151,6 +1897,7 @@ function App() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [histCache, setHistCache] = useState<Record<string, HistoryEntry>>({});
   const [viewingHistoryId, setViewingHistoryId] = useState<string | null>(null);
+  const [copiedHistId, setCopiedHistId] = useState<string | null>(null);
   const historyPopRef = useRef<HTMLDivElement>(null);
   const [layoutDock, setLayoutDock] = useState<LayoutDock>(
     () => bootSession.layoutDock,
@@ -2193,6 +1940,20 @@ function App() {
   const editorSplitAxisRef = useRef(editorSplitAxis);
   editorSplitAxisRef.current = editorSplitAxis;
   const [openTabs, setOpenTabs] = useState<string[]>(() => bootSession.openTabs);
+  /** Browser-like tab drag: follow pointer + siblings slide; commit on release.
+   *  Pointer events (not HTML5 DnD) — avoids GTK dnd-* cursor theme spam on WSL. */
+  const [tabDrag, setTabDrag] = useState<null | {
+    id: string;
+    from: number;
+    insertAt: number;
+    width: number;
+  }>(null);
+  const tabDragRef = useRef(tabDrag);
+  tabDragRef.current = tabDrag;
+  const tabDragArmedRef = useRef(false);
+  const suppressTabClickRef = useRef(false);
+  const openTabsRef = useRef(openTabs);
+  openTabsRef.current = openTabs;
   const [settingsSection, setSettingsSection] = useState<SettingsSection>(() =>
     asSettingsSection(bootSession.settingsSection),
   );
@@ -2393,12 +2154,19 @@ function App() {
   }, [mcpLogsOpen]);
 
   const refreshEnvs = useCallback(async () => {
-    const list = await invoke<Environment[]>("list_environments");
+    if (!workspaceId) {
+      setEnvs([]);
+      setEnvDrafts({});
+      return;
+    }
+    const list = await invoke<Environment[]>("list_environments", {
+      workspaceId,
+    });
     setEnvs(list);
     const drafts: Record<string, Pair[]> = {};
     for (const e of list) drafts[e.id] = parseVars(e.varsJson);
     setEnvDrafts(drafts);
-  }, []);
+  }, [workspaceId]);
 
   const refreshWorkspaces = useCallback(async () => {
     const list = await invoke<Workspace[]>("list_workspaces");
@@ -2559,7 +2327,132 @@ function App() {
     setSelectedId(tid);
   }
 
+  async function copyHistoryId(id: string) {
+    await navigator.clipboard.writeText(id);
+    setCopiedHistId(id);
+    window.setTimeout(() => setCopiedHistId(null), 1500);
+  }
+
+  /**
+   * Browser-like tab reorder: dragged tab follows the pointer; siblings slide
+   * with CSS transitions; `openTabs` commits on release only.
+   * Pointer-based (not HTML5 DnD) so GTK doesn't hunt for dnd-move/dnd-none cursors.
+   */
+  function stripTabPointer(id: string) {
+    return {
+      "data-tab-id": id,
+      onPointerDown: (e: ReactPointerEvent) => {
+        if (e.button !== 0) return;
+        if ((e.target as HTMLElement).closest(".opentab-close")) return;
+        window.getSelection()?.removeAllRanges();
+        const startX = e.clientX;
+        const el = e.currentTarget as HTMLElement;
+        tabDragArmedRef.current = false;
+
+        let layout: { id: string; center: number; width: number }[] = [];
+        let from = -1;
+        let width = 0;
+
+        const onMove = (ev: PointerEvent) => {
+          const strip = tabStripRef.current;
+          if (!strip) return;
+          if (!tabDragArmedRef.current) {
+            if (Math.abs(ev.clientX - startX) < 5) return;
+            const tabs = openTabsRef.current;
+            from = tabs.indexOf(id);
+            if (from < 0) return;
+            const nodes = [
+              ...strip.querySelectorAll<HTMLElement>(".opentab[data-tab-id]"),
+            ];
+            layout = nodes.map((node) => ({
+              id: node.dataset.tabId!,
+              center: node.offsetLeft + node.offsetWidth / 2,
+              width: node.offsetWidth,
+            }));
+            width = layout[from]?.width ?? el.offsetWidth;
+            tabDragArmedRef.current = true;
+            suppressTabClickRef.current = true;
+            setTabDrag({ id, from, insertAt: from, width });
+            document.body.classList.add("opentab-reordering");
+            window.getSelection()?.removeAllRanges();
+          }
+          const dx = ev.clientX - startX;
+          el.style.transform = `translateX(${dx}px)`;
+
+          const stripRect = strip.getBoundingClientRect();
+          const edge = 36;
+          if (ev.clientY >= stripRect.top - 4 && ev.clientY <= stripRect.bottom + 4) {
+            if (ev.clientX < stripRect.left + edge) strip.scrollLeft -= 12;
+            else if (ev.clientX > stripRect.right - edge) strip.scrollLeft += 12;
+          } else {
+            return;
+          }
+
+          const dragCenter = (layout[from]?.center ?? 0) + dx;
+          let insertAt = 0;
+          for (let i = 0; i < layout.length; i++) {
+            if (i === from) continue;
+            if (dragCenter > layout[i].center) insertAt++;
+          }
+          setTabDrag((prev) => {
+            if (!prev || prev.id !== id) return prev;
+            if (prev.insertAt === insertAt) return prev;
+            return { ...prev, insertAt };
+          });
+        };
+
+        const onUp = () => {
+          window.removeEventListener("pointermove", onMove);
+          window.removeEventListener("pointerup", onUp);
+          window.removeEventListener("pointercancel", onUp);
+          el.style.transform = "";
+          const drag = tabDragRef.current;
+          document.body.classList.remove("opentab-reordering");
+          tabDragArmedRef.current = false;
+          setTabDrag(null);
+          if (drag && drag.id === id) {
+            setOpenTabs((tabs) =>
+              moveTabIndex(tabs, drag.from, drag.insertAt),
+            );
+          }
+          window.setTimeout(() => {
+            suppressTabClickRef.current = false;
+          }, 0);
+        };
+
+        window.addEventListener("pointermove", onMove);
+        window.addEventListener("pointerup", onUp);
+        window.addEventListener("pointercancel", onUp);
+      },
+    };
+  }
+
+  function tabDragStyle(id: string): CSSProperties | undefined {
+    if (!tabDrag) return undefined;
+    const i = openTabs.indexOf(id);
+    if (i < 0) return undefined;
+    if (id === tabDrag.id) {
+      return {
+        position: "relative",
+        zIndex: 3,
+        transition: "none",
+        opacity: 0.92,
+      };
+    }
+    const shift = tabSiblingShift(
+      i,
+      tabDrag.from,
+      tabDrag.insertAt,
+      tabDrag.width,
+    );
+    return {
+      transform: `translateX(${shift}px)`,
+      transition: "transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1)",
+    };
+  }
+
   function switchTab(id: string) {
+    if (suppressTabClickRef.current) return;
     setEnvViewId(null);
     if (id === selectedId) return;
     snapshotActive();
@@ -2960,12 +2853,22 @@ function App() {
 
   useEffect(() => {
     refreshWorkspaces().catch((e) => setError(String(e)));
+  }, [refreshWorkspaces]);
+
+  useEffect(() => {
     refreshEnvs().catch((e) => setError(String(e)));
-  }, [refreshWorkspaces, refreshEnvs]);
+  }, [refreshEnvs]);
 
   useEffect(() => {
     refreshCollections().catch((e) => setError(String(e)));
   }, [refreshCollections]);
+
+  // Drop env editor if the viewed env is not in this workspace's list.
+  useEffect(() => {
+    if (envViewId && !envs.some((e) => e.id === envViewId)) {
+      setEnvViewId(null);
+    }
+  }, [envs, envViewId]);
 
   useEffect(() => {
     if (collectionId) {
@@ -3497,6 +3400,8 @@ function App() {
       pathVarsJson?: string;
     },
     resolvedUrl: string,
+    active: Record<string, string> = {},
+    global: Record<string, string> = {},
   ): string {
     let headers: unknown = [];
     try {
@@ -3516,16 +3421,17 @@ function App() {
     } catch {
       pathVars = [];
     }
+    const bodyRaw = req.body?.trim() ? req.body : null;
     return JSON.stringify({
       urlTemplate: req.url,
       resolvedUrl,
-      headers,
-      body: req.body?.trim() ? req.body : null,
+      headers: substituteInPairsJson(headers, active, global),
+      body: bodyRaw ? substituteVars(bodyRaw, active, global) : null,
       bodyType: req.bodyType ?? "none",
-      bodyPairs,
+      bodyPairs: substituteInPairsJson(bodyPairs, active, global),
       authType: req.authType ?? "none",
-      authJson: req.authJson ?? "{}",
-      pathVars,
+      authJson: substituteVars(req.authJson ?? "{}", active, global),
+      pathVars: substituteInPairsJson(pathVars, active, global),
     });
   }
 
@@ -3559,12 +3465,14 @@ function App() {
     setSending(true);
     setError(null);
     setViewingHistoryId(null);
+    let activeVars: Record<string, string> = {};
+    let globalVars: Record<string, string> = {};
     try {
       const saved = await save();
       if (!saved) return;
-      const [activeVars, globalVars] = await invoke<
+      [activeVars, globalVars] = await invoke<
         [Record<string, string>, Record<string, string>]
-      >("resolve_env_maps");
+      >("resolve_env_maps", { workspaceId });
       const res = await invoke<SendResult>("send_http_request", {
         input: {
           method: saved.method,
@@ -3594,31 +3502,41 @@ function App() {
         body: res.body,
         bodyPretty: res.bodyPretty,
         headers: res.headers,
-        requestJson: historyRequestSnapshot(saved, res.resolvedUrl || saved.url),
+        requestJson: historyRequestSnapshot(
+          saved,
+          res.resolvedUrl || saved.url,
+          activeVars,
+          globalVars,
+        ),
       });
     } catch (e) {
       const msg = String(e);
       setError(msg);
       setResult(null);
+      const failUrl =
+        resolveRequestUrl(composedUrl, pathPairs, activeVars, globalVars) ||
+        composedUrl;
       await recordHistory({
         requestId: draft.id,
         method: draft.method,
-        url: composedUrl,
+        url: failUrl,
         error: msg,
         elapsedMs: 0,
         sizeBytes: 0,
         requestJson: historyRequestSnapshot(
           {
             url: draft.url,
-            headersJson: JSON.stringify(headers),
+            headersJson: pairsToJson(headers),
             body: draft.body,
             bodyType: draft.bodyType,
-            bodyPairsJson: draft.bodyPairsJson,
+            bodyPairsJson: bodyPairsToJson(bodyPairs),
             authType: draft.authType,
             authJson: draft.authJson,
-            pathVarsJson: draft.pathVarsJson,
+            pathVarsJson: pairsToJson(pathPairs),
           },
-          composedUrl,
+          failUrl,
+          activeVars,
+          globalVars,
         ),
       });
     } finally {
@@ -3988,7 +3906,7 @@ function App() {
     if (workspaces.length <= 1) return;
     const ok = await dialogs.confirm({
       title: "Delete workspace?",
-      message: `Delete “${ws.name}” and all of its collections, folders, requests, and history? This cannot be undone.`,
+      message: `Delete “${ws.name}” and all of its collections, folders, requests, environments, and history? This cannot be undone.`,
       confirmLabel: "Delete",
       danger: true,
     });
@@ -4223,6 +4141,7 @@ function App() {
     const copy: Environment = {
       id: crypto.randomUUID(),
       name,
+      workspaceId,
       isGlobal: false,
       isActive: false,
       varsJson: varsToJson(pairs),
@@ -4315,6 +4234,7 @@ function App() {
   }
 
   async function newEnvironment() {
+    if (!workspaceId) return;
     const name = await dialogs.prompt({
       title: "New environment",
       label: "Environment name",
@@ -4325,6 +4245,7 @@ function App() {
     const env: Environment = {
       id: crypto.randomUUID(),
       name,
+      workspaceId,
       isGlobal: false,
       isActive: true,
       varsJson: "{}",
@@ -5293,9 +5214,6 @@ function App() {
                   <Trash2 {...Ism} /> Clean up
                 </Button>
               </div>
-              <div className="sidebar-banner info">
-                Workspace history stays on this device.
-              </div>
               <ul className="tree history-list">
                 {history.length === 0 && (
                   <li className="empty-side">No history yet — send a request</li>
@@ -5305,7 +5223,7 @@ function App() {
                     <div className="history-group-label">{label}</div>
                     <ul className="tree">
                       {rows.map((h) => (
-                        <li key={h.id}>
+                        <li key={h.id} className="history-row">
                           <button
                             type="button"
                             className={`history-entry ${
@@ -5334,6 +5252,26 @@ function App() {
                             >
                               {h.error ? "ERR" : h.status}
                             </span>
+                          </button>
+                          <button
+                            type="button"
+                            className="history-copy-id"
+                            data-tip={
+                              copiedHistId === h.id
+                                ? "Copied"
+                                : "Copy ID for MCP get_history"
+                            }
+                            aria-label="Copy history ID"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void copyHistoryId(h.id);
+                            }}
+                          >
+                            {copiedHistId === h.id ? (
+                              "✓"
+                            ) : (
+                              <Copy {...Ism} />
+                            )}
                           </button>
                         </li>
                       ))}
@@ -5378,7 +5316,9 @@ function App() {
                       key={id}
                       className={`opentab env-tab ${
                         !envViewId && selectedId === SETTINGS_ID ? "active" : ""
-                      }`}
+                      }${tabDrag?.id === SETTINGS_ID ? " dragging" : ""}`}
+                      style={tabDragStyle(SETTINGS_ID)}
+                      {...stripTabPointer(SETTINGS_ID)}
                       onClick={() => switchTab(SETTINGS_ID)}
                       onContextMenu={(e) => {
                         e.preventDefault();
@@ -5417,7 +5357,9 @@ function App() {
                       key={id}
                       className={`opentab env-tab ${
                         !envViewId && selectedId === id ? "active" : ""
-                      }`}
+                      }${tabDrag?.id === id ? " dragging" : ""}`}
+                      style={tabDragStyle(id)}
+                      {...stripTabPointer(id)}
                       onClick={() => switchTab(id)}
                       onContextMenu={(e) => {
                         e.preventDefault();
@@ -5461,7 +5403,9 @@ function App() {
                       key={id}
                       className={`opentab env-tab ${
                         !envViewId && selectedId === id ? "active" : ""
-                      }`}
+                      }${tabDrag?.id === id ? " dragging" : ""}`}
+                      style={tabDragStyle(id)}
+                      {...stripTabPointer(id)}
                       onClick={() => switchTab(id)}
                       onContextMenu={(e) => {
                         e.preventDefault();
@@ -5474,6 +5418,13 @@ function App() {
                         }
                       }}
                     >
+                      <span
+                        className="opentab-hist-mark"
+                        aria-hidden
+                        data-tip="History snapshot"
+                      >
+                        <History {...Ism} />
+                      </span>
                       <span className={methodClass(h?.method ?? "GET")}>
                         {methodLabel(h?.method ?? "GET")}
                       </span>
@@ -5504,7 +5455,9 @@ function App() {
                     key={id}
                     className={`opentab ${
                       !envViewId && id === selectedId ? "active" : ""
-                    }`}
+                    }${tabDrag?.id === id ? " dragging" : ""}`}
+                    style={tabDragStyle(id)}
+                    {...stripTabPointer(id)}
                     onClick={() => switchTab(id)}
                     onContextMenu={(e) => {
                       e.preventDefault();
@@ -5670,9 +5623,19 @@ function App() {
                                 <BookOpen {...Ism} />
                               </span>
                             ) : t.kind === "history" ? (
-                              <span className={methodClass(t.method ?? "GET")}>
-                                {methodLabel(t.method ?? "GET")}
-                              </span>
+                              <>
+                                <span
+                                  className="opentab-hist-mark"
+                                  aria-hidden
+                                >
+                                  <History {...Ism} />
+                                </span>
+                                <span
+                                  className={methodClass(t.method ?? "GET")}
+                                >
+                                  {methodLabel(t.method ?? "GET")}
+                                </span>
+                              </>
                             ) : t.kind === "env" ? (
                               <span className="env-tab-mark" aria-hidden>
                                 <Braces {...Ism} />
@@ -5830,16 +5793,44 @@ function App() {
               const reqName = entry.requestId
                 ? requestTitles.get(entry.requestId)
                 : null;
+              const histReq = entry.requestId
+                ? requests.find((r) => r.id === entry.requestId)
+                : undefined;
+              const histCrumb = histReq
+                ? [
+                    collections.find((c) => c.id === histReq.collectionId)
+                      ?.name ?? collection?.name,
+                    ...folderPath(histReq.folderId, folders),
+                  ].filter((p): p is string => Boolean(p))
+                : [];
               return (
                 <HistoryDetail
                   key={entry.id}
                   entry={entry}
                   requestName={reqName}
+                  requestDescription={histReq?.description ?? null}
+                  crumbPath={histCrumb}
+                  activeVars={activeVarMap}
+                  globalVars={globalVarMap}
+                  env={activeEnv ?? null}
+                  envPairs={
+                    activeEnv
+                      ? (envDrafts[activeEnv.id] ??
+                        parseVars(activeEnv.varsJson))
+                      : []
+                  }
+                  globalPairs={
+                    globalEnv
+                      ? (envDrafts[globalEnv.id] ??
+                        parseVars(globalEnv.varsJson))
+                      : []
+                  }
                   onOpenRequest={
                     entry.requestId
                       ? () => {
                           void (async () => {
                             const rid = entry.requestId!;
+                            // Already open → focus that tab (insertTab skips dups).
                             const fromList = requests.find((r) => r.id === rid);
                             if (fromList) {
                               openRequest(fromList);
@@ -5893,24 +5884,10 @@ function App() {
             </div>
           ) : (
             <>
-              {(crumbPath.length > 0 || draft) && (
-                <div className="req-crumb">
-                  {crumbPath.map((part, i) => (
-                    <span key={`${i}-${part}`} className="req-crumb-seg">
-                      {i > 0 && (
-                        <span className="req-crumb-sep" aria-hidden>
-                          ›
-                        </span>
-                      )}
-                      <span className="req-crumb-part">{part}</span>
-                    </span>
-                  ))}
-                  {crumbPath.length > 0 && (
-                    <span className="req-crumb-sep" aria-hidden>
-                      ›
-                    </span>
-                  )}
-                  {crumbEditing ? (
+              <RequestChrome
+                crumbPath={crumbPath}
+                titleSlot={
+                  crumbEditing ? (
                     <input
                       className="req-crumb-title-input"
                       value={crumbDraft}
@@ -5940,64 +5917,44 @@ function App() {
                         <Pencil {...Ism} />
                       </span>
                     </button>
-                  )}
-                  {resolvedUrl.trim() && (
-                    <span
-                      className="req-crumb-url"
-                      title={resolvedUrl}
-                      data-tip={resolvedUrl}
+                  )
+                }
+                resolvedUrl={resolvedUrl}
+                method={draft.method}
+                onMethodChange={(method) => setDraft({ ...draft, method })}
+                url={composedUrl}
+                onUrlChange={onUrlChange}
+                urlHistoryKey={selectedId ?? ""}
+                urlInputRef={urlRef}
+                env={activeEnv ?? null}
+                envPairs={
+                  activeEnv
+                    ? (envDrafts[activeEnv.id] ?? parseVars(activeEnv.varsJson))
+                    : []
+                }
+                globalPairs={
+                  globalEnv
+                    ? (envDrafts[globalEnv.id] ?? parseVars(globalEnv.varsJson))
+                    : []
+                }
+                onSaveVar={saveEnvVar}
+                onOpenEnv={(id) => openEnvView(id)}
+                actions={
+                  <>
+                    <Button
+                      variant="primary"
+                      className="send"
+                      onClick={() => void send()}
+                      disabled={sending}
                     >
-                      {resolvedUrl}
-                    </span>
-                  )}
-                </div>
-              )}
-              <div className="url-bar">
-                <Select
-                  className="method-picker"
-                  value={draft.method}
-                  options={(draft.method.toUpperCase() === "WS"
-                    ? ["WS", ...METHODS]
-                    : METHODS
-                  ).map((m) => ({ id: m, label: m }))}
-                  onChange={(method) => setDraft({ ...draft, method })}
-                  tip="Method"
-                />
-                <UrlField
-                  inputRef={urlRef}
-                  className="url-input"
-                  value={composedUrl}
-                  onChange={onUrlChange}
-                  historyKey={selectedId ?? ""}
-                  placeholder="{{baseUrl}}/path"
-                  env={activeEnv ?? null}
-                  envPairs={
-                    activeEnv
-                      ? (envDrafts[activeEnv.id] ??
-                        parseVars(activeEnv.varsJson))
-                      : []
-                  }
-                  globalPairs={
-                    globalEnv
-                      ? (envDrafts[globalEnv.id] ??
-                        parseVars(globalEnv.varsJson))
-                      : []
-                  }
-                  onSaveVar={saveEnvVar}
-                  onOpenEnv={(id) => openEnvView(id)}
-                />
-                <Button
-                  variant="primary"
-                  className="send"
-                  onClick={() => void send()}
-                  disabled={sending}
-                >
-                  {sending ? "…" : "Send"}
-                </Button>
-                <Button variant="secondary" onClick={() => void save()}>
-                  Save
-                </Button>
-              </div>
+                      {sending ? "…" : "Send"}
+                    </Button>
+                    <Button variant="secondary" onClick={() => void save()}>
+                      Save
+                    </Button>
+                  </>
+                }
+              />
 
               <div
                 ref={splitRef}

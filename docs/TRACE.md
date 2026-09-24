@@ -2,7 +2,7 @@
 
 **Purpose:** Living log so any new chat stays on track. Agents **read this first**, then **append** after each user request they work on.
 
-**Last updated:** 2026-08-14 (auto save setting)
+**Last updated:** 2026-09-11 (workspace-scoped environments)
 
 ---
 
@@ -48,6 +48,7 @@
 - Phase 1: localhost MCP bridge + bundled `stdio.mjs` + tools  
 - Phase 2: OpenAPI import/export + collection folders, unique sibling names, drag-reorder  
 - Local **workspaces** (Workspace → Collections) with searchable picker in titlebar  
+- **Environments per workspace** (own Global + active; list/create/active scoped; cascade on delete)
 - Scoped global search + persisted **workspace / per-request** history  
 - Sidebar cleaned up (collections forest, env on URL bar) like Requestly rail+tree  
 - Settings tab (titlebar ⚙ → open tab; General + MCP copy path/config)  
@@ -62,6 +63,111 @@
 ---
 
 ## Trace log (newest first)
+
+### 2026-09-11 — Workspace-scoped environments
+**User asked:** Tie environments to workspaces so each workspace has its own and only those show.
+**Did:** `environments.workspace_id` migrate + backfill; per-workspace Global/Local seed on create; scoped list/active/upsert/delete; cascade on `delete_workspace`. Wired `workspaceId` through Tauri/`resolve_env_maps`, bridge, MCP tools, OpenAPI import, App `refreshEnvs`. Rust tests `environments_are_workspace_scoped` + cascade. Docs: [`docs/MCP.md`](./MCP.md).
+**Needs next:** Phase 3 sync spike remains next feature.
+
+### 2026-09-11 — Explored env ↔ workspace relation
+**User asked:** How environments and workspaces relate today (models, workspace_id, UI filter, API, migration patterns).
+**Did:** Read-only map: environments are **app-global** (no `workspace_id`); `is_global` = the single Global-vars env, not workspace scope. Collections already scoped via `workspace_id` + `list_collections(workspaceId)` migration pattern in `db.rs`. Key touch points: `src-tauri/src/db.rs`, `lib.rs`, `bridge.rs`, `src/App.tsx` (`refreshEnvs` / rail / URL picker), `mcp/src/tools.ts`.
+**Needs next:** If scoping envs to workspaces: mirror collections migration (`ALTER` + backfill), filter list/active/upsert/delete, cascade on `delete_workspace`, MCP `workspaceId` params, UI refresh on workspace switch.
+
+### 2026-09-11 — History sidebar: drop device banner
+**User asked:** Remove “Workspace history stays on this device.” from the UI.
+**Did:** Deleted the `sidebar-banner` under History in [`src/App.tsx`](../src/App.tsx).
+**Needs next:** Phase 3 sync spike remains next feature.
+
+### 2026-08-14 — History sidebar: drop MCP copy-ID banner
+**User asked:** Don’t put “Copy an entry ID to inspect via MCP get_history” on the actual app.
+**Did:** Restored sidebar banner to “Workspace history stays on this device.” Copy ID still on hover + snapshot tab.
+**Needs next:** Phase 3 sync spike remains next feature.
+
+### 2026-08-14 — History copy ID + MCP history tools
+**User asked:** Copy history entry ID in UI so agents can inspect snapshots via MCP during development.
+**Did:** Bridge routes `GET /v1/history/{id}`, `/v1/workspaces/{id}/history`, `/v1/requests/{id}/history`. MCP tools `get_history`, `list_workspace_history`, `list_request_history`. UI: sidebar history row copy button (hover) + **Copy ID** on snapshot tab ([`HistoryDetail.tsx`](../src/HistoryDetail.tsx)); sidebar banner mentions MCP. [`docs/MCP.md`](./MCP.md) updated.
+**Needs next:** Phase 3 sync spike remains next feature.
+
+### 2026-08-14 — Tab strip: pointer drag (no HTML5 DnD)
+**User asked:** Gdk spam `Unable to load dnd-move` / `dnd-none` while dragging tabs (WSL/GTK cursor theme).
+**Did:** Reverted tab strip to pointer-based reorder (follow pointer + sibling slide + commit on release). Avoids native HTML5 DnD cursors that GTK can’t load here. Tree DnD still uses HTML5 (same Gdk noise if you drag folders/requests).
+**Needs next:** Phase 3 sync spike remains next feature.
+
+### 2026-08-14 — Tree-like tab strip DnD
+**User asked:** Tab dragging like collections/folder/request sibling drag-drop.
+**Did:** Replaced pointer-follow tab reorder with HTML5 DnD (`application/inpost-tab`), before/after drop markers on sibling tabs, commit via `reorderTab` on drop. Tiny drag ghost; CSS `drag-source` / `drop-before` / `drop-after`.
+**Needs next:** Phase 3 sync spike remains next feature.
+
+### 2026-08-14 — Browser-like tab drag
+**User asked:** Smooth reorder transition like browser tabs.
+**Did:** Dragged tab follows the pointer; siblings slide with CSS transitions via `tabSiblingShift`; order commits on release (`moveTabIndex`). No live DOM shuffle while dragging.
+**Needs next:** Phase 3 sync spike remains next feature.
+
+### 2026-08-14 — Smooth tab reorder
+**User asked:** Tab switching/moving while drag wasn’t smooth.
+**Did:** FLIP animation on sibling tabs when `openTabs` reorders; edge auto-scroll on the strip; dragged tab stays un-animated (opacity + lift).
+**Needs next:** Phase 3 sync spike remains next feature.
+
+### 2026-08-14 — Tab strip disables text selection
+**User asked:** Tab titles highlight/select while dragging.
+**Did:** `user-select: none` on `.opentabs` / `.opentab`; clear selection on pointerdown and when a reorder arms.
+**Needs next:** Phase 3 sync spike remains next feature.
+
+### 2026-08-14 — Tab reorder stays in strip
+**User asked:** Tab drag ghost could leave the tab bar into the editor.
+**Did:** Replaced HTML5 DnD with pointer reorder confined to the open-tab strip (no floating drag image). Reorder only while the pointer is over the strip.
+**Needs next:** Phase 3 sync spike remains next feature.
+
+### 2026-08-14 — Drag-reorder open tabs
+**User asked:** Rearrange tabs by dragging.
+**Did:** HTML5 drag-and-drop on the open-tab strip; `reorderTab` in [`tabClose.ts`](../src/tabClose.ts). Order persists via workspace session `openTabs`.
+**Needs next:** Phase 3 sync spike remains next feature.
+
+### 2026-08-14 — History tabs show History icon
+**User asked:** Distinguish history vs playground tabs (option A: icon + method + name).
+**Did:** Open-tab strip and tab search: history entries show History icon, then method, then name. Active tab tints the icon accent.
+**Needs next:** Phase 3 sync spike remains next feature.
+
+### 2026-08-14 — History response body empty
+**User asked:** History response body showing nothing.
+**Did:** History `editor-split` used a 3-column playground grid (with 0px sash) but only two children, so the response pane collapsed into the sash column. Switched to a 2-column `1fr 1fr` grid.
+**Needs next:** Phase 3 sync spike remains next feature.
+
+### 2026-08-14 — Shared RequestChrome
+**User asked:** Fix history/playground UI drift via shared components.
+**Did:** Extracted [`RequestChrome.tsx`](../src/RequestChrome.tsx) (crumb + url-bar); App + HistoryDetail both use it. History uses `editor-split` / `request-pane` / `section-body` / `response-top`, Overview + tab dots, empty query row parity; DocArticle `readOnly`.
+**Needs next:** Phase 3 sync spike remains next feature.
+
+### 2026-08-14 — Fix bridge move of env maps
+**User asked:** Rust compile error borrowing `active`/`global` after move in bridge.
+**Did:** Clone env maps into `SendRequestInput` so history snapshot closures can still borrow them.
+**Needs next:** Phase 3 sync spike remains next feature.
+
+### 2026-08-14 — History head matches playground URL bar
+**User asked:** History head/url bar still not same as playground; replace Send/Save with Open request (+ arrow).
+**Did:** History uses same `req-crumb` + `url-bar` (disabled method Select + readOnly UrlField). Status/meta moved to response-top. Primary **Open request** with ArrowUpRight focuses existing tab or opens the request.
+**Needs next:** Phase 3 sync spike remains next feature.
+
+### 2026-08-14 — History shows resolved env values
+**User asked:** History should render resolved values, not `{{xyz}}` templates.
+**Did:** Snapshots now store substituted headers/body/auth/pathVars at send (UI + MCP bridge). History detail also resolves leftover `{{vars}}` with current env for older rows; query params come from the resolved URL.
+**Needs next:** Phase 3 sync spike remains next feature.
+
+### 2026-08-14 — History detail frozen playground controls
+**User asked:** Same UI as playground but all inputs disabled.
+**Did:** Extracted [`PairTable.tsx`](../src/PairTable.tsx) with `readOnly`; history uses PairTable + body-type radios + auth Select/fields + CodeEditor, all disabled/read-only. Select gained `disabled`. Response headers use PairTable too.
+**Needs next:** Phase 3 sync spike remains next feature.
+
+### 2026-08-14 — History detail matches playground chrome
+**User asked:** History snapshot still dissimilar in spacing vs playground.
+**Did:** Restructured [`HistoryDetail.tsx`](../src/HistoryDetail.tsx) like the editor split: compact head + URL strip; request tabs Params/Headers/Body/Auth aligned with response Body/Headers; reused `.section-tabs` / `.body-toolbar` / pane padding so spacing matches the playground.
+**Needs next:** Phase 3 sync spike remains next feature.
+
+### 2026-08-14 — History response Body/Headers tabs
+**User asked:** History snapshot stacks response headers above body; use playground-style tabs instead.
+**Did:** [`HistoryDetail.tsx`](../src/HistoryDetail.tsx) response pane uses `section-tabs` Body / Headers (count); JSON/Raw stays on Body. Pane flex so the editor fills remaining height.
+**Needs next:** Phase 3 sync spike remains next feature.
 
 ### 2026-08-14 — Auto save setting
 **User asked:** Settings: auto save + save-after delay in ms; when on, save after that delay.

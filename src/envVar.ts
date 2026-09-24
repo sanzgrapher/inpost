@@ -145,6 +145,35 @@ export function resolveRequestUrl(
   return substituteVars(applyPathVars(url, path), active, global);
 }
 
+/**
+ * Resolve `{{vars}}` in history snapshot pair rows (`[k,v]` or `{key,value,…}`).
+ * Used when writing request_json and when rendering older template snapshots.
+ */
+export function substituteInPairsJson(
+  raw: unknown,
+  active: Record<string, string>,
+  global: Record<string, string> = {},
+): unknown {
+  if (!Array.isArray(raw)) return raw;
+  return raw.map((row) => {
+    if (Array.isArray(row) && row.length >= 2) {
+      const next = row.slice();
+      next[0] = substituteVars(String(row[0] ?? ""), active, global);
+      next[1] = substituteVars(String(row[1] ?? ""), active, global);
+      return next;
+    }
+    if (row && typeof row === "object") {
+      const o = row as Record<string, unknown>;
+      return {
+        ...o,
+        key: substituteVars(String(o.key ?? ""), active, global),
+        value: substituteVars(String(o.value ?? ""), active, global),
+      };
+    }
+    return row;
+  });
+}
+
 // Runnable self-check: `npx tsx src/envVar.ts`
 declare const process: { argv: string[] } | undefined;
 if (typeof process !== "undefined" && process.argv[1]?.includes("envVar")) {
@@ -209,6 +238,18 @@ if (typeof process !== "undefined" && process.argv[1]?.includes("envVar")) {
       { baseUrl: "https://pokeapi.co/api/v2", typeId: "3" },
     ) === "https://pokeapi.co/api/v2/type/3",
     "resolve pipeline",
+  );
+  console.assert(
+    JSON.stringify(
+      substituteInPairsJson(
+        [
+          ["A", "{{t}}"],
+          { key: "{{k}}", value: "{{t}}", enabled: true },
+        ],
+        { t: "1", k: "X" },
+      ),
+    ) === JSON.stringify([["A", "1"], { key: "X", value: "1", enabled: true }]),
+    "substitute pairs json",
   );
 
   console.log("envVar self-check ok");

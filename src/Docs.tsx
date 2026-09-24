@@ -171,6 +171,7 @@ export function DocArticle({
   placeholder,
   emptyHint,
   actions,
+  readOnly = false,
 }: {
   title: string;
   meta?: ReactNode;
@@ -179,6 +180,8 @@ export function DocArticle({
   placeholder: string;
   emptyHint: string;
   actions?: ReactNode;
+  /** History snapshot: view only, no Edit. */
+  readOnly?: boolean;
 }) {
   const [editing, setEditing] = useState(false);
   return (
@@ -188,24 +191,26 @@ export function DocArticle({
           <h1 className="doc-title">{title || "Untitled"}</h1>
           <div className="doc-actions">
             {actions}
-            <button
-              type="button"
-              className="doc-edit-btn"
-              onClick={() => setEditing((v) => !v)}
-            >
-              {editing ? (
-                "Done"
-              ) : (
-                <>
-                  <Pencil {...I} /> Edit
-                </>
-              )}
-            </button>
+            {!readOnly && (
+              <button
+                type="button"
+                className="doc-edit-btn"
+                onClick={() => setEditing((v) => !v)}
+              >
+                {editing ? (
+                  "Done"
+                ) : (
+                  <>
+                    <Pencil {...I} /> Edit
+                  </>
+                )}
+              </button>
+            )}
           </div>
         </div>
         {meta}
         <div className="doc-section-label">Description</div>
-        {editing ? (
+        {!readOnly && editing ? (
           <MarkdownEditor
             value={value}
             onChange={onChange}
@@ -214,6 +219,10 @@ export function DocArticle({
           />
         ) : value.trim() ? (
           <Markdown source={value} />
+        ) : readOnly ? (
+          <div className="doc-empty" style={{ cursor: "default" }}>
+            {emptyHint}
+          </div>
         ) : (
           <button
             type="button"

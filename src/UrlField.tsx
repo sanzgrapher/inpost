@@ -24,6 +24,8 @@ type Props = {
   inputRef?: RefObject<HTMLInputElement | null>;
   placeholder?: string;
   className?: string;
+  /** Snapshot / history: same chrome, no edits or env hover. */
+  readOnly?: boolean;
   env: EnvInfo | null;
   envPairs: Pair[];
   globalPairs?: Pair[];
@@ -45,6 +47,7 @@ export function UrlField({
   inputRef,
   placeholder,
   className = "",
+  readOnly = false,
   env,
   envPairs,
   globalPairs = [],
@@ -236,8 +239,9 @@ export function UrlField({
   return (
     <div
       ref={wrapRef}
-      className={`url-field ${focused ? "focused" : ""} ${className}`}
+      className={`url-field ${focused && !readOnly ? "focused" : ""} ${readOnly ? "read-only" : ""} ${className}`.trim()}
       onClick={(e) => {
+        if (readOnly) return;
         if (wrapRef.current?.contains(e.target as Node)) {
           localRef.current?.focus();
         }
@@ -252,10 +256,21 @@ export function UrlField({
         value={value}
         placeholder={placeholder}
         spellCheck={false}
-        onChange={(e) => commit(e.target.value)}
-        onFocus={() => setFocused(true)}
+        readOnly={readOnly}
+        tabIndex={readOnly ? -1 : undefined}
+        onChange={(e) => {
+          if (readOnly) return;
+          commit(e.target.value);
+        }}
+        onFocus={() => {
+          if (!readOnly) setFocused(true);
+        }}
         onBlur={() => setFocused(false)}
         onKeyDown={(e) => {
+          if (readOnly) {
+            e.preventDefault();
+            return;
+          }
           const mod = e.ctrlKey || e.metaKey;
           if (mod && e.key.toLowerCase() === "z") {
             e.preventDefault();
@@ -269,9 +284,12 @@ export function UrlField({
           }
         }}
       />
-      {!focused && <div className="url-field-hit">{renderTokens(true)}</div>}
+      {!focused && !readOnly && (
+        <div className="url-field-hit">{renderTokens(true)}</div>
+      )}
 
-      {hover &&
+      {!readOnly &&
+        hover &&
         resolved &&
         createPortal(
           <div

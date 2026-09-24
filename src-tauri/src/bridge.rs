@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use crate::db::{mcp_dir, Db, Environment, HistoryEntry, HttpRequest, TreeOrderItem};
 use crate::http_exec::{self, SendRequestInput};
+use inpost_core::envsubst;
 
 const LOG_CAP: usize = 200;
 
@@ -172,6 +173,12 @@ fn query_param(url: &str, key: &str) -> Option<String> {
     })
 }
 
+fn parse_limit(url: &str, default: i64) -> i64 {
+    query_param(url, "limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
+}
+
 fn handle(
     db: &Arc<Db>,
     auth: &str,
@@ -208,6 +215,23 @@ fn handle(
                     Err(e) => json_err(500, e),
                 },
                 Err(e) => json_err(400, e),
+            }
+        }
+        (&Method::Get, p) if p.starts_with("/v1/workspaces/") && p.ends_with("/history") => {
+            let id = p
+                .trim_start_matches("/v1/workspaces/")
+                .trim_end_matches("/history");
+            match db.list_workspace_history(id.to_string(), parse_limit(&url, 100)) {
+                Ok(v) => json_ok(v),
+                Err(e) => json_err(500, e),
+            }
+        }
+        (&Method::Get, p) if p.starts_with("/v1/history/") => {
+            let id = p.trim_start_matches("/v1/history/");
+            match db.get_history(id) {
+                Ok(Some(v)) => json_ok(v),
+                Ok(None) => json_err(404, "not found"),
+                Err(e) => json_err(500, e),
             }
         }
         (&Method::Get, "/v1/collections") => {
@@ -344,6 +368,15 @@ fn handle(
                 Err(e) => json_err(400, e),
             }
         }
+        (&Method::Get, p) if p.starts_with("/v1/requests/") && p.ends_with("/history") => {
+            let id = p
+                .trim_start_matches("/v1/requests/")
+                .trim_end_matches("/history");
+            match db.list_request_history(id.to_string(), parse_limit(&url, 50)) {
+                Ok(v) => json_ok(v),
+                Err(e) => json_err(500, e),
+            }
+        }
         (&Method::Get, p) if p.starts_with("/v1/requests/") => {
             let id = p.trim_start_matches("/v1/requests/");
             match db.get_request(id) {
@@ -387,10 +420,13 @@ fn handle(
                 Err(e) => json_err(500, e),
             }
         }
-        (&Method::Get, "/v1/environments") => match db.list_environments() {
-            Ok(v) => json_ok(v),
-            Err(e) => json_err(500, e),
-        },
+        (&Method::Get, "/v1/environments") => {
+            let wid = query_param(&url, "workspaceId");
+            match db.list_environments(wid) {
+                Ok(v) => json_ok(v),
+                Err(e) => json_err(500, e),
+            }
+        }
         (&Method::Post, "/v1/environments") => match read_body(&mut request).and_then(|b| {
             serde_json::from_slice::<Environment>(&b).map_err(|e| e.to_string())
         }) {
@@ -404,7 +440,7 @@ fn handle(
                 }
             }
             Err(e) => json_err(400, e),
-        },
+        }
         (&Method::Put, p) if p.starts_with("/v1/environments/") => {
             let id = p.trim_start_matches("/v1/environments/").to_string();
             match read_body(&mut request).and_then(|b| {
@@ -430,7 +466,8 @@ fn handle(
             }
         }
         (&Method::Get, "/v1/environments/active") => {
-            match db.list_environments() {
+            let wid = query_param(&url, "workspaceId");
+            match db.list_environments(wid) {
                 Ok(envs) => {
                     let active = envs.into_iter().find(|e| e.is_active && !e.is_global);
                     json_ok(active)
@@ -511,7 +548,10 @@ fn run_request(
     environment_id: Option<&str>,
 ) -> Result<http_exec::SendRequestResult, String> {
     let req = db.get_request(request_id)?;
-    let envs = db.list_environments()?;
+    let workspace_id = db
+        .workspace_for_collection(&req.collection_id)?
+        .ok_or_else(|| "request collection has no workspace".to_string())?;
+    let envs = db.list_environments(Some(workspace_id.clone()))?;
     let mut active = HashMap::new();
     let mut global = HashMap::new();
     for e in &envs {
@@ -542,35 +582,70 @@ fn run_request(
         auth_type: req.auth_type.clone(),
         auth_json: req.auth_json.clone(),
         path_vars,
-        active_vars: active,
-        global_vars: global,
+        active_vars: active.clone(),
+        global_vars: global.clone(),
     });
 
     // Same history the UI writes, so MCP runs show up in the History rail.
-    if let Ok(Some(workspace_id)) = db.workspace_for_collection(&req.collection_id) {
+    {
         let created_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
+        let sub = |s: &str| envsubst::substitute(s, &active, &global);
+        let sub_pairs = |raw: &str| -> serde_json::Value {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else {
+                return serde_json::json!([]);
+            };
+            let Some(arr) = v.as_array() else {
+                return v;
+            };
+            serde_json::Value::Array(
+                arr.iter()
+                    .map(|row| {
+                        if let Some(pair) = row.as_array() {
+                            if pair.len() >= 2 {
+                                let mut next = pair.clone();
+                                next[0] = serde_json::Value::String(sub(
+                                    pair[0].as_str().unwrap_or(""),
+                                ));
+                                next[1] = serde_json::Value::String(sub(
+                                    pair[1].as_str().unwrap_or(""),
+                                ));
+                                return serde_json::Value::Array(next);
+                            }
+                        }
+                        if let Some(obj) = row.as_object() {
+                            let mut out = obj.clone();
+                            if let Some(k) = obj.get("key").and_then(|x| x.as_str()) {
+                                out.insert("key".into(), serde_json::Value::String(sub(k)));
+                            }
+                            if let Some(val) = obj.get("value").and_then(|x| x.as_str()) {
+                                out.insert("value".into(), serde_json::Value::String(sub(val)));
+                            }
+                            return serde_json::Value::Object(out);
+                        }
+                        row.clone()
+                    })
+                    .collect(),
+            )
+        };
         let request_json = |resolved: &str| {
             Some(
                 serde_json::json!({
                     "urlTemplate": req.url,
                     "resolvedUrl": resolved,
-                    "headers": serde_json::from_str::<serde_json::Value>(&req.headers_json)
-                        .unwrap_or_else(|_| serde_json::json!([])),
+                    "headers": sub_pairs(&req.headers_json),
                     "body": if req.body.is_empty() {
                         serde_json::Value::Null
                     } else {
-                        serde_json::Value::String(req.body.clone())
+                        serde_json::Value::String(sub(&req.body))
                     },
                     "bodyType": req.body_type,
-                    "bodyPairs": serde_json::from_str::<serde_json::Value>(&req.body_pairs_json)
-                        .unwrap_or_else(|_| serde_json::json!([])),
+                    "bodyPairs": sub_pairs(&req.body_pairs_json),
                     "authType": req.auth_type,
-                    "authJson": req.auth_json,
-                    "pathVars": serde_json::from_str::<serde_json::Value>(&req.path_vars_json)
-                        .unwrap_or_else(|_| serde_json::json!([])),
+                    "authJson": sub(&req.auth_json),
+                    "pathVars": sub_pairs(&req.path_vars_json),
                 })
                 .to_string(),
             )

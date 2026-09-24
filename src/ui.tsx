@@ -85,6 +85,7 @@ export function Select({
   placeholder = "Select…",
   className = "",
   tip,
+  disabled = false,
 }: {
   value: string;
   options: { id: string; label: string }[];
@@ -92,6 +93,7 @@ export function Select({
   placeholder?: string;
   className?: string;
   tip?: string;
+  disabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -109,11 +111,19 @@ export function Select({
   }, [open]);
 
   return (
-    <div className={`ui-select ${className}`.trim()} ref={rootRef} data-tip={tip}>
+    <div
+      className={`ui-select ${disabled ? "disabled" : ""} ${className}`.trim()}
+      ref={rootRef}
+      data-tip={tip}
+    >
       <button
         type="button"
         className={`ui-select-trigger ${open ? "open" : ""}`}
-        onClick={() => setOpen((v) => !v)}
+        disabled={disabled}
+        onClick={() => {
+          if (disabled) return;
+          setOpen((v) => !v);
+        }}
       >
         <span className="ui-select-value">
           {current?.label ?? placeholder}
@@ -122,7 +132,7 @@ export function Select({
           <ChevronDown {...Ism} />
         </span>
       </button>
-      {open && (
+      {open && !disabled && (
         <div className="ui-select-menu">
           {options.map((o) => (
             <button

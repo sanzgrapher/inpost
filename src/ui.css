@@ -128,7 +128,14 @@
   text-align: left;
 }
 
-.ui-select-trigger:hover {
+.ui-select-trigger:disabled,
+.ui-select.disabled .ui-select-trigger {
+  opacity: 0.72;
+  cursor: not-allowed;
+  background: var(--bg);
+}
+
+.ui-select-trigger:hover:not(:disabled) {
   border-color: #9ca3af;
 }
 

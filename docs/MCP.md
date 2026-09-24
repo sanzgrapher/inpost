@@ -61,8 +61,9 @@ Snake_case tool names matching the UI feature set:
 - `set_collection_description` — collection docs (OpenAPI `info.description`)
 - `list_requests` / `get_request` / `create_request` / `update_request` / `delete_request`
   - Request `description` is Markdown (OpenAPI `operation.description`). Omit on `update_request` to keep existing docs; pass `""` to clear.
-- `list_environments` / `create_environment` / `update_environment` / `set_active_environment` / `get_active_environment`
-- `run_request` — optional `environmentId` (omit = active env). Same request against Local vs Prod: two calls, different ids; does **not** flip the UI active env. Use `set_active_environment` only when you want the app's active env to change.
+- `list_environments` / `create_environment` / `update_environment` / `set_active_environment` / `get_active_environment` — environments are **per workspace** (`workspaceId` required on list/get-active/create/update). Each workspace has its own Global + active Local/Prod/….
+- `run_request` — optional `environmentId` (omit = active env). Same request against Local vs Prod: two calls, different ids; does **not** flip the UI active env. Use `set_active_environment` only when you want the app's active env to change. Env resolution uses the request's workspace (Global + chosen/active non-global from that workspace only).
+- `get_history` / `list_workspace_history` / `list_request_history` — read persisted run snapshots (request + response + `requestJson`). In the app: **History** rail or snapshot tab → **Copy ID** → `get_history({ historyId })` for full debug payload. `list_workspace_history` needs `workspaceId` (Settings → workspace → Copy). `list_request_history` scopes to one saved request.
 
 ### Documentation field (agents)
 

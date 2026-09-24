@@ -86,6 +86,8 @@ fn default_empty_object() -> String {
 pub struct Environment {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub workspace_id: String,
     pub is_global: bool,
     pub is_active: bool,
     pub vars_json: String,
@@ -162,6 +164,29 @@ fn has_column(conn: &Connection, table: &str, col: &str) -> Result<bool, String>
         }
     }
     Ok(false)
+}
+
+fn seed_workspace_envs(conn: &Connection, workspace_id: &str) -> Result<(), String> {
+    let gid = Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT INTO environments (id, name, workspace_id, is_global, is_active, vars_json)
+         VALUES (?1, ?2, ?3, 1, 0, ?4)",
+        params![gid, "Global", workspace_id, "{}"],
+    )
+    .map_err(|e| e.to_string())?;
+    let aid = Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT INTO environments (id, name, workspace_id, is_global, is_active, vars_json)
+         VALUES (?1, ?2, ?3, 0, 1, ?4)",
+        params![
+            aid,
+            "Local",
+            workspace_id,
+            r#"{"baseUrl":"https://httpbin.org"}"#
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 fn migrate(conn: &Connection) -> Result<(), String> {
@@ -275,6 +300,18 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
 
+    if !has_column(conn, "environments", "workspace_id")? {
+        conn.execute_batch(
+            "ALTER TABLE environments ADD COLUMN workspace_id TEXT REFERENCES workspaces(id);",
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    conn.execute(
+        "UPDATE environments SET workspace_id = ?1 WHERE workspace_id IS NULL OR workspace_id = ''",
+        params![default_ws],
+    )
+    .map_err(|e| e.to_string())?;
+
     if !has_column(conn, "requests", "folder_id")? {
         conn.execute_batch(
             "
@@ -344,24 +381,31 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     }
 
-    let en: i64 = conn
-        .query_row("SELECT COUNT(*) FROM environments", [], |r| r.get(0))
-        .map_err(|e| e.to_string())?;
-    if en == 0 {
-        let gid = Uuid::new_v4().to_string();
-        conn.execute(
-            "INSERT INTO environments (id, name, is_global, is_active, vars_json)
-             VALUES (?1, ?2, 1, 0, ?3)",
-            params![gid, "Global", "{}"],
-        )
-        .map_err(|e| e.to_string())?;
-        let aid = Uuid::new_v4().to_string();
-        conn.execute(
-            "INSERT INTO environments (id, name, is_global, is_active, vars_json)
-             VALUES (?1, ?2, 0, 1, ?3)",
-            params![aid, "Local", r#"{"baseUrl":"https://httpbin.org"}"#],
-        )
-        .map_err(|e| e.to_string())?;
+    // Seed Global + Local for any workspace that has no environments (fresh DB
+    // or workspaces created before envs were workspace-scoped).
+    {
+        let ws_ids: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT id FROM workspaces")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |r| r.get(0))
+                .map_err(|e| e.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?
+        };
+        for wid in ws_ids {
+            let en: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM environments WHERE workspace_id = ?1",
+                    params![wid],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            if en == 0 {
+                seed_workspace_envs(conn, &wid)?;
+            }
+        }
     }
 
     if !has_column(conn, "requests", "body_type")? {
@@ -542,6 +586,7 @@ impl Db {
             params![id, name],
         )
         .map_err(|e| e.to_string())?;
+        seed_workspace_envs(&conn, &id)?;
         Ok(Workspace { id, name })
     }
 
@@ -579,7 +624,7 @@ impl Db {
         })
     }
 
-    /// Deletes a workspace and its collections / folders / requests / history.
+    /// Deletes a workspace and its collections / folders / requests / history / environments.
     /// Refuses when it would leave zero workspaces.
     pub fn delete_workspace(&self, id: &str) -> Result<(), String> {
         let conn = self.0.lock().map_err(|e| e.to_string())?;
@@ -619,6 +664,11 @@ impl Db {
         .map_err(|e| e.to_string())?;
         conn.execute(
             "DELETE FROM request_history WHERE workspace_id = ?1",
+            params![id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM environments WHERE workspace_id = ?1",
             params![id],
         )
         .map_err(|e| e.to_string())?;
@@ -1096,47 +1146,75 @@ impl Db {
     pub fn get_environment(&self, id: &str) -> Result<Environment, String> {
         let conn = self.0.lock().map_err(|e| e.to_string())?;
         conn.query_row(
-            "SELECT id, name, is_global, is_active, vars_json FROM environments WHERE id = ?1",
+            "SELECT id, name, workspace_id, is_global, is_active, vars_json FROM environments WHERE id = ?1",
             params![id],
             |r| {
                 Ok(Environment {
                     id: r.get(0)?,
                     name: r.get(1)?,
-                    is_global: r.get::<_, i64>(2)? != 0,
-                    is_active: r.get::<_, i64>(3)? != 0,
-                    vars_json: r.get(4)?,
+                    workspace_id: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    is_global: r.get::<_, i64>(3)? != 0,
+                    is_active: r.get::<_, i64>(4)? != 0,
+                    vars_json: r.get(5)?,
                 })
             },
         )
         .map_err(|e| e.to_string())
     }
 
-    pub fn list_environments(&self) -> Result<Vec<Environment>, String> {
+    pub fn list_environments(
+        &self,
+        workspace_id: Option<String>,
+    ) -> Result<Vec<Environment>, String> {
         let conn = self.0.lock().map_err(|e| e.to_string())?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, name, is_global, is_active, vars_json FROM environments ORDER BY is_global DESC, name",
-            )
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |r| {
-                Ok(Environment {
-                    id: r.get(0)?,
-                    name: r.get(1)?,
-                    is_global: r.get::<_, i64>(2)? != 0,
-                    is_active: r.get::<_, i64>(3)? != 0,
-                    vars_json: r.get(4)?,
-                })
+        let sql = if workspace_id.is_some() {
+            "SELECT id, name, workspace_id, is_global, is_active, vars_json FROM environments \
+             WHERE workspace_id = ?1 ORDER BY is_global DESC, name"
+        } else {
+            "SELECT id, name, workspace_id, is_global, is_active, vars_json FROM environments \
+             ORDER BY is_global DESC, name"
+        };
+        let map_row = |r: &rusqlite::Row| -> rusqlite::Result<Environment> {
+            Ok(Environment {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                workspace_id: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                is_global: r.get::<_, i64>(3)? != 0,
+                is_active: r.get::<_, i64>(4)? != 0,
+                vars_json: r.get(5)?,
             })
-            .map_err(|e| e.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())
+        };
+        let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+        let rows = if let Some(wid) = workspace_id {
+            stmt.query_map(params![wid], map_row)
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+        } else {
+            stmt.query_map([], map_row)
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+        };
+        rows.map_err(|e| e.to_string())
     }
 
     pub fn set_active_environment(&self, id: String) -> Result<(), String> {
         let conn = self.0.lock().map_err(|e| e.to_string())?;
-        conn.execute("UPDATE environments SET is_active = 0 WHERE is_global = 0", [])
-            .map_err(|e| e.to_string())?;
+        let workspace_id: String = conn
+            .query_row(
+                "SELECT workspace_id FROM environments WHERE id = ?1 AND is_global = 0",
+                params![id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .map_err(|_| "environment not found".to_string())?
+            .unwrap_or_default();
+        if workspace_id.is_empty() {
+            return Err("environment has no workspace".into());
+        }
+        conn.execute(
+            "UPDATE environments SET is_active = 0 WHERE workspace_id = ?1 AND is_global = 0",
+            params![workspace_id],
+        )
+        .map_err(|e| e.to_string())?;
         conn.execute(
             "UPDATE environments SET is_active = 1 WHERE id = ?1 AND is_global = 0",
             params![id],
@@ -1147,21 +1225,29 @@ impl Db {
 
     pub fn upsert_environment(&self, env: Environment) -> Result<Environment, String> {
         let conn = self.0.lock().map_err(|e| e.to_string())?;
+        if env.workspace_id.is_empty() {
+            return Err("workspaceId is required".into());
+        }
         if env.is_active && !env.is_global {
-            conn.execute("UPDATE environments SET is_active = 0 WHERE is_global = 0", [])
-                .map_err(|e| e.to_string())?;
+            conn.execute(
+                "UPDATE environments SET is_active = 0 WHERE workspace_id = ?1 AND is_global = 0",
+                params![env.workspace_id],
+            )
+            .map_err(|e| e.to_string())?;
         }
         conn.execute(
-            "INSERT INTO environments (id, name, is_global, is_active, vars_json)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO environments (id, name, workspace_id, is_global, is_active, vars_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(id) DO UPDATE SET
                name=excluded.name,
+               workspace_id=excluded.workspace_id,
                is_global=excluded.is_global,
                is_active=excluded.is_active,
                vars_json=excluded.vars_json",
             params![
                 env.id,
                 env.name,
+                env.workspace_id,
                 env.is_global as i64,
                 env.is_active as i64,
                 env.vars_json
@@ -1173,34 +1259,33 @@ impl Db {
 
     pub fn delete_environment(&self, id: &str) -> Result<(), String> {
         let conn = self.0.lock().map_err(|e| e.to_string())?;
-        let is_global: i64 = conn
+        let (is_global, was_active, workspace_id): (i64, i64, String) = conn
             .query_row(
-                "SELECT is_global FROM environments WHERE id = ?1",
+                "SELECT is_global, is_active, workspace_id FROM environments WHERE id = ?1",
                 params![id],
-                |r| r.get(0),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    ))
+                },
             )
             .map_err(|_| "environment not found".to_string())?;
         if is_global != 0 {
             return Err("cannot delete the global environment".into());
         }
-        let was_active: i64 = conn
-            .query_row(
-                "SELECT is_active FROM environments WHERE id = ?1",
-                params![id],
-                |r| r.get(0),
-            )
-            .map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM environments WHERE id = ?1", params![id])
             .map_err(|e| e.to_string())?;
-        if was_active != 0 {
-            // Activate another non-global env if any remain.
+        if was_active != 0 && !workspace_id.is_empty() {
             let _ = conn.execute(
                 "UPDATE environments SET is_active = 1
                  WHERE id = (
-                   SELECT id FROM environments WHERE is_global = 0
+                   SELECT id FROM environments
+                   WHERE workspace_id = ?1 AND is_global = 0
                    ORDER BY name LIMIT 1
                  )",
-                [],
+                params![workspace_id],
             );
         }
         Ok(())
@@ -1423,6 +1508,10 @@ mod tests {
         })
         .unwrap();
 
+        assert!(!db
+            .list_environments(Some(ws2.id.clone()))
+            .unwrap()
+            .is_empty());
         db.delete_workspace(&ws2.id).unwrap();
         assert_eq!(db.list_workspaces().unwrap().len(), 1);
         assert!(db.list_collections(Some(ws2.id.clone())).unwrap().is_empty());
@@ -1430,10 +1519,72 @@ mod tests {
             .list_workspace_history(ws2.id.clone(), 10)
             .unwrap()
             .is_empty());
+        assert!(db
+            .list_environments(Some(ws2.id.clone()))
+            .unwrap()
+            .is_empty());
         assert_eq!(
             db.delete_workspace(&ws1).unwrap_err(),
             "cannot delete the last workspace"
         );
+    }
+
+    #[test]
+    fn environments_are_workspace_scoped() {
+        let db = mem_db();
+        let ws1 = db.list_workspaces().unwrap()[0].id.clone();
+        let ws2 = db.create_workspace("Other".into()).unwrap();
+
+        let a = db.list_environments(Some(ws1.clone())).unwrap();
+        let b = db.list_environments(Some(ws2.id.clone())).unwrap();
+        assert!(a.iter().any(|e| e.is_global));
+        assert!(b.iter().any(|e| e.is_global));
+        assert!(a.iter().all(|e| e.workspace_id == ws1));
+        assert!(b.iter().all(|e| e.workspace_id == ws2.id));
+        assert!(a.iter().all(|e| !b.iter().any(|x| x.id == e.id)));
+
+        let a_active = a.iter().find(|e| e.is_active && !e.is_global).unwrap();
+        let b_local = b.iter().find(|e| !e.is_global).unwrap();
+        // Activate a non-active env in A (create Prod, activate it) — B's active stays.
+        let prod = db
+            .upsert_environment(Environment {
+                id: Uuid::new_v4().to_string(),
+                name: "Prod".into(),
+                workspace_id: ws1.clone(),
+                is_global: false,
+                is_active: true,
+                vars_json: "{}".into(),
+            })
+            .unwrap();
+        assert!(prod.is_active);
+        let a_after = db.list_environments(Some(ws1.clone())).unwrap();
+        assert_eq!(
+            a_after
+                .iter()
+                .filter(|e| e.is_active && !e.is_global)
+                .count(),
+            1
+        );
+        assert!(!a_after
+            .iter()
+            .find(|e| e.id == a_active.id)
+            .unwrap()
+            .is_active);
+        let b_after = db.list_environments(Some(ws2.id.clone())).unwrap();
+        assert!(b_after
+            .iter()
+            .find(|e| e.id == b_local.id)
+            .unwrap()
+            .is_active);
+
+        db.set_active_environment(a_active.id.clone()).unwrap();
+        assert!(db
+            .list_environments(Some(ws2.id.clone()))
+            .unwrap()
+            .iter()
+            .find(|e| e.id == b_local.id)
+            .unwrap()
+            .is_active);
     }
 
     fn hist(workspace_id: String, created_at: i64) -> HistoryEntry {
