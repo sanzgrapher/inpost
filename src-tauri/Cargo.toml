@@ -1,6 +1,6 @@
 [package]
 name = "inpost"
-version = "0.1.0"
+version = "0.1.1"
 description = "Local-first API client"
 authors = ["Inpost contributors"]
 edition = "2021"

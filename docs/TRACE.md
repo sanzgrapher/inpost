@@ -2,7 +2,7 @@
 
 **Purpose:** Living log so any new chat stays on track. Agents **read this first**, then **append** after each user request they work on.
 
-**Last updated:** 2026-09-11 (workspace-scoped environments)
+**Last updated:** 2026-09-25 (v0.1.1 release)
 
 ---
 
@@ -11,6 +11,8 @@
 |---|---|
 | **Phase** | Phase 0 ✅ · Phase 1 MCP ✅ · Phase 2 ✅ · Local workspaces ✅ · Settings tab ✅ · Release pipeline ✅ |
 | **Next up** | Phase 3 sync-engine spike (PowerSync vs ElectricSQL) |
+| **Auto-update** | **A (notify-only)** ✅ — GitHub latest release check + toast / Settings Download. Full in-app install (B) still backlog |
+| **Release** | Cutting **v0.1.1** (short notes + collapsible changelog) |
 | **OpenAPI MCP** | `import_openapi` / `export_openapi`: `summary` = request name; `tags` = folders (3.2 `parent` when nested) |
 | **PokéAPI ws** | Docs + env-wired requests filled via MCP (Prod active) |
 | **App** | Tauri 2 + React + SQLite · `com.inpost.desktop` · MIT |
@@ -34,6 +36,8 @@
 - [ ] Phase 4: multi-user roles / presence
 - [x] GitHub Actions cross-platform builds (tag-driven release matrix + push-main check)
 - [ ] Code-signing / notarization for release artifacts (certs / Apple Developer ID)
+- [ ] In-app auto-update (`tauri-plugin-updater` + release update JSON; needs signing keys) — Option B
+- [x] Notify-only update check (Option A): toast + Settings → Check / Download → GitHub Releases
 - [ ] Scripts / Tests / Debug tabs, OAuth/JWT, cookies, Timeline, GraphQL, binary body (deferred)
 - [ ] Auth inherit-from-folder; multipart file bytes on the wire (UI Text/File done)
 - [ ] Docs polish: image upload/paste, per-folder descriptions, "View complete documentation" collection page listing all requests (Postman-style)
@@ -63,6 +67,26 @@
 ---
 
 ## Trace log (newest first)
+
+### 2026-09-25 — Push + cut v0.1.1
+**User asked:** Push and make a new release; keep notes to 1–3 short statements + collapsible changelog (Feature / Fix / …).
+**Did:** Bumped `0.1.0`→`0.1.1` (package/tauri/Cargo); `release.yml` drops auto-generated long notes; commit update-check + About GitHub; push main + tag `v0.1.1`; set short release body with `<details>` changelog.
+**Needs next:** Watch release matrix; Option B still backlog; Phase 3 sync.
+
+### 2026-09-24 — About: logo + GitHub repo
+**User asked:** Add GitHub URL and logo as well as the repo.
+**Did:** Settings → About: Inpost logo + version row; GitHub row with official mark SVG (lucide dropped brands), clickable `sanzgrapher/inpost`, Open → `REPO_URL`. Exported `REPO_URL` from `appUpdate.ts`.
+**Needs next:** Option B later; Phase 3 sync spike.
+
+### 2026-09-24 — Notify-only updates (Option A)
+**User asked:** Implement A (notify only, not full auto-install).
+**Did:** `src/appUpdate.ts` — normalize/compare versions, fetch GitHub `releases/latest`, dismiss via localStorage; self-check in `npm run check`. App: launch check → dismissible toast with Download (`openUrl`); Settings → About shows version + Check for updates / Download. No updater plugin / signing keys.
+**Needs next:** Option B later (plugin + keypair + CI). Phase 3 sync spike remains next feature.
+
+### 2026-09-24 — Auto-update for installed apps (Q&A)
+**User asked:** How do we handle “update available” on already-installed Inpost? Is it doable?
+**Did:** Confirmed yes. No updater today (`tauri.conf.json` has no `plugins.updater`; Cargo has no `tauri-plugin-updater`). Recommended path: Tauri 2 `tauri-plugin-updater` + GitHub Releases endpoint + minisign pubkey; UI `check()` → banner → `downloadAndInstall()` → `relaunch()`. Full auto-update needs updater signing keys (and ideally OS code-signing already on backlog). Lighter alternative: poll latest GitHub release version and open download page.
+**Needs next:** Decide A (notify-only) vs B (full updater). B requires generating updater keypair + wiring `release.yml` to publish signed update artifacts.
 
 ### 2026-09-11 — Workspace-scoped environments
 **User asked:** Tie environments to workspaces so each workspace has its own and only those show.

@@ -3906,6 +3906,10 @@ body.sash-dragging .sidebar {
   animation: ui-pop 0.14s ease;
 }
 
+.export-toast-stack {
+  bottom: 108px;
+}
+
 .export-toast > svg {
   flex: none;
   color: #16a34a;
@@ -4166,6 +4170,41 @@ body.sash-dragging .sidebar {
   font-size: 12.5px;
   line-height: 1.45;
   color: #71717a;
+}
+
+.settings-about-brand {
+  align-items: center;
+}
+
+.settings-about-logo {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+}
+
+.settings-about-gh {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  color: #18181b;
+}
+
+.settings-link {
+  border: none;
+  background: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: #2563eb;
+  cursor: pointer;
+  text-align: left;
+}
+
+.settings-link:hover {
+  text-decoration: underline;
 }
 
 .settings-action {

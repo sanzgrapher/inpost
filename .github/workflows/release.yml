@@ -71,8 +71,8 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'Inpost ${{ github.ref_name }}'
-          releaseBody: 'See the assets to download this version and install.'
+          releaseBody: 'Download the installer for your platform below.'
           releaseDraft: false
           prerelease: false
-          generateReleaseNotes: true
+          generateReleaseNotes: false
           args: ${{ matrix.args }}
