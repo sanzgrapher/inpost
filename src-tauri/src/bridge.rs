@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use tauri::{AppHandle, Emitter};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 use uuid::Uuid;
 
@@ -64,7 +65,7 @@ impl BridgeState {
     }
 }
 
-pub fn start(db: Arc<Db>) -> Result<Arc<BridgeState>, String> {
+pub fn start(db: Arc<Db>, app: AppHandle) -> Result<Arc<BridgeState>, String> {
     let token = Uuid::new_v4().to_string();
     let server = Server::http("127.0.0.1:0").map_err(|e| e.to_string())?;
     let port = server
@@ -86,7 +87,7 @@ pub fn start(db: Arc<Db>) -> Result<Arc<BridgeState>, String> {
     let state_thread = Arc::clone(&state);
     thread::spawn(move || {
         for request in server.incoming_requests() {
-            let _ = handle(&db_thread, &auth_thread, &state_thread, request);
+            let _ = handle(&db_thread, &auth_thread, &state_thread, &app, request);
         }
     });
 
@@ -183,6 +184,7 @@ fn handle(
     db: &Arc<Db>,
     auth: &str,
     state: &BridgeState,
+    app: &AppHandle,
     mut request: Request,
 ) -> Result<(), ()> {
     let method = request.method().clone();
@@ -393,7 +395,7 @@ fn handle(
                 }
                 match db.upsert_request(req) {
                     Ok(v) => json_ok(v),
-                    Err(e) => json_err(500, e),
+                    Err(e) => json_err(400, e),
                 }
             }
             Err(e) => json_err(400, e),
@@ -407,7 +409,7 @@ fn handle(
                     req.id = id;
                     match db.upsert_request(req) {
                         Ok(v) => json_ok(v),
-                        Err(e) => json_err(500, e),
+                        Err(e) => json_err(400, e),
                     }
                 }
                 Err(e) => json_err(400, e),
@@ -544,8 +546,11 @@ fn handle(
     } else {
         None
     };
-    state.push_log(method_s, path, status, detail);
+    state.push_log(method_s, path.clone(), status, detail);
     let _ = request.respond(response);
+    if status < 400 && method != Method::Get && path != "/v1/run" {
+        let _ = app.emit("bridge-changed", json!({ "method": format!("{method:?}"), "path": path }));
+    }
     Ok(())
 }
 
@@ -635,12 +640,20 @@ fn run_request(
                     .collect(),
             )
         };
-        let request_json = |resolved: &str| {
+        let request_json = |resolved: &str, sent: Option<&Vec<(String, String)>>| {
+            let headers = match sent {
+                Some(h) => serde_json::Value::Array(
+                    h.iter()
+                        .map(|(k, v)| serde_json::json!({ "key": k, "value": v, "enabled": true }))
+                        .collect(),
+                ),
+                None => sub_pairs(&req.headers_json),
+            };
             Some(
                 serde_json::json!({
                     "urlTemplate": req.url,
                     "resolvedUrl": resolved,
-                    "headers": sub_pairs(&req.headers_json),
+                    "headers": headers,
                     "body": if req.body.is_empty() {
                         serde_json::Value::Null
                     } else {
@@ -670,7 +683,7 @@ fn run_request(
                 body: Some(r.body.clone()),
                 body_pretty: r.body_pretty.clone(),
                 headers_json: Some(serde_json::to_string(&r.headers).unwrap_or_else(|_| "[]".into())),
-                request_json: request_json(&r.resolved_url),
+                request_json: request_json(&r.resolved_url, Some(&r.sent_headers)),
                 created_at,
             },
             Err(e) => HistoryEntry {
@@ -687,7 +700,7 @@ fn run_request(
                 body: None,
                 body_pretty: None,
                 headers_json: None,
-                request_json: request_json(&req.url),
+                request_json: request_json(&req.url, None),
                 created_at,
             },
         };

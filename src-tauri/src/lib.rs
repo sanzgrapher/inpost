@@ -131,6 +131,11 @@ fn list_requests(
 }
 
 #[tauri::command]
+fn get_request(state: tauri::State<'_, Arc<Db>>, id: String) -> Result<HttpRequest, String> {
+    state.get_request(&id)
+}
+
+#[tauri::command]
 fn upsert_request(
     state: tauri::State<'_, Arc<Db>>,
     request: HttpRequest,
@@ -428,7 +433,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let db = Arc::new(db::open()?);
-            let bridge = bridge::start(Arc::clone(&db))?;
+            let bridge = bridge::start(Arc::clone(&db), app.handle().clone())?;
             eprintln!(
                 "Inpost MCP bridge at {} (stdio under {:?})",
                 bridge.bridge_url,
@@ -480,6 +485,7 @@ pub fn run() {
             rename_folder,
             reorder_siblings,
             list_requests,
+            get_request,
             upsert_request,
             delete_request,
             list_environments,

@@ -2,7 +2,7 @@
 
 **Purpose:** Living log so any new chat stays on track. Agents **read this first**, then **append** after each user request they work on.
 
-**Last updated:** 2026-10-08 (#2 delete_environment done; #3 / #4 triaged)
+**Last updated:** 2026-10-08 (#3 headers fix + live header matrix fixes, UI check pending)
 
 ---
 
@@ -21,7 +21,7 @@
 | **MCP ref** | Localhost bridge + `session.json` + bundled `stdio.mjs`; Requestly MCP *packaging* (open MIT SDK) |
 | **Run** | `npm run build:mcp && npm run tauri dev` (or `npm run tauri dev` which runs build:mcp first) |
 | **Check** | `npm run check` → `cargo test -p inpost-core` + `src/searchQuery.ts` / `src/shortcuts.ts` / `src/workspaceSession.ts` / `src/envVar.ts` / `src/envSync.ts` / `src/reqMeta.ts` / `src/tabClose.ts` self-checks |
-| **Dev MCP (WSL)** | `inpost-dev-v3` in `~/.cursor/mcp.json` → dev data dir `stdio.mjs`; bump `vN` after every `mcp/src` change (see AGENTS.md). Windows prod = `inpost` in Windows config |
+| **Dev MCP (WSL)** | `inpost-dev-v5` in `~/.cursor/mcp.json` → dev data dir `stdio.mjs`; bump `vN` after every `mcp/src` change (see AGENTS.md). Windows prod = `inpost` in Windows config |
 | **MCP config** | Keep app open; point Cursor at `~/.local/share/com.inpost.desktop/mcp/stdio.mjs` (Linux) / `%APPDATA%\com.inpost.desktop\mcp\stdio.mjs` (Windows) — or copy from **Settings → MCP** |
 
 ### Key docs
@@ -40,7 +40,7 @@
 - [ ] In-app auto-update (`tauri-plugin-updater` + release update JSON; needs signing keys) — Option B
 - [x] Notify-only update check (Option A): toast + Settings → Check / Download → GitHub Releases
 - [ ] Scripts / Tests / Debug tabs, OAuth/JWT, cookies, Timeline, GraphQL, binary body (deferred)
-- [x] [#2](https://github.com/sanzgrapher/inpost/issues/2) MCP `delete_environment` (verified live; commit + close issue pending)
+- [x] [#2](https://github.com/sanzgrapher/inpost/issues/2) MCP `delete_environment` (shipped `d7376c5`, closed)
 - [ ] [#3](https://github.com/sanzgrapher/inpost/issues/3) headers (commit object fix, keep disabled, normalize MCP writes, UI refresh) · [#4](https://github.com/sanzgrapher/inpost/issues/4) AppImage WebKit SIGABRT
 - [ ] Auth inherit-from-folder; multipart file bytes on the wire (UI Text/File done) — [#1](https://github.com/sanzgrapher/inpost/issues/1)
 - [ ] Docs polish: image upload/paste, per-folder descriptions, "View complete documentation" collection page listing all requests (Postman-style)
@@ -70,6 +70,36 @@
 ---
 
 ## Trace log (newest first)
+
+### 2026-10-08 — Headers vs Yaak + inline header-name validation
+**User asked:** Is header work complete vs Yaak (mountain-loop/yaak)? Picked only "validate header names as you type".
+**Did:** Compared Yaak `HeadersEditor` / `useInheritedHeaders` / `defaultHeaders` / `validateHttpHeader`: parity on rows+enabled, vars in key/value, default UA/Accept (shown as "Sent automatically"), name suggestions, sent-headers history, external sync. Added `reqMeta.headerNameError` (same token rule as Rust send; `{{vars}}` allowed) + self-check; `PairTable.validateKey` → `SuggestInput.invalid` (red border, `data-tip` message, `aria-invalid`); Headers tab wires it. Env-var popover widened 320→380px.
+**Needs next:** Not chosen (backlog-worthy): inherited workspace/folder headers, header value presets (MIME etc.), bulk edit for headers, masking secret header values.
+
+### 2026-10-08 — Live header matrix (httpbin / postman-echo / hoppscotch echo / GitHub)
+**User asked:** Test headers against public test APIs: env vars, every header kind, how each is handled.
+**Did:** 18 requests `HT01–HT18` in temp ws "MCP bug check (temp)" (Local + Global env vars). Already correct: Local beats Global, missing `{{var}}` sent literally, disabled rows skipped, empty value sent, duplicates all sent (server merges), user Accept/User-Agent/lowercase content-type win, bearer/basic/apikey override same-name user header, apikey query, urlencoded/multipart force CT, unicode sent as raw UTF-8 (server shows Latin-1 mojibake, same as other clients). Fixed in `http_exec::send`: `{{var}}` in header **keys** now substituted; invalid name/value → `Invalid header name "X Bad Key"…` / `Invalid value for header "X-Inject"…` instead of opaque `builder error` (CRLF injection still blocked); default `User-Agent: Inpost/<ver>` (GitHub 403'd without it); text body defaults `text/plain`; GET sends its body (was: CT sent, body dropped), HEAD drops both. Mirrored in `reqMeta.autoHeaders` + self-check; MCP headersJson description updated; test `bad_headers_name_the_culprit`. Dev MCP → `inpost-dev-v5`. UI follow-up: `var-field` hover layer rendered text tokens as empty spans, so `Bearer {{token}}-{{gonly}}` drew vars shifted over the text (doubled/garbled, hover targets off) — `EnvVarHover.renderHit` now renders the text too. Request vs history audit (HT01): body/response headers/size identical; history request headers = sent headers. Fixed `HistoryDetail`: request headers no longer re-substituted with the *current* env (they're recorded as sent — a later-defined `{{nope}}` would have lied); response headers use the same read-only `kv-table` as the live pane instead of checkbox/input rows.
+**Needs next:** UI checks for #3 + these, then commit/push, close #3; delete temp ws when done.
+
+### 2026-10-08 — History records sent headers + "Sent automatically" hint
+**User asked:** Typo'd `Content-Type: application/jsons` on a multipart request, history showed it but response showed `application/json` — what's actually sent? Then: proceed with both fixes.
+**Did:** Diagnosis: response pane = httpbin's response headers; wire had `multipart/form-data; boundary=…` (multipart/urlencoded always override Content-Type); history snapshot stored editor values, not the wire. Fix: `http_exec::send` sets `Accept: */*` explicitly when absent (same as reqwest default) and returns `sentHeaders` (final list after auth / body Content-Type / Accept; Host + Content-Length not listed). UI + bridge history `requestJson.headers` now use `sentHeaders` on success (editor values on failure). `reqMeta.autoHeaders` mirrors the Rust rules (auth header, form/multipart Content-Type, JSON default, Accept) with `replaces` flag + self-check; Headers tab shows a "Sent automatically" list (amber "replaces yours"). Verified via MCP: re-run of the multipart request recorded `Content-Type: multipart/form-data; boundary=…` + `Accept: */*`, matching httpbin's echo. `npm run check` + `cargo test` green.
+**Needs next:** Visual check of the Headers-tab section; then commit with the #3 work. `autoHeaders` must be kept in sync with `http_exec::send`.
+
+### 2026-10-08 — #3 headers: canonical rows, keep disabled, MCP refresh
+**User asked:** Implement the #3 plan (core scope; dirty-tab conflict = Reload / Keep mine banner).
+**Did:** `httputil::kv_rows` / `normalize_pairs` (canonical `[{key,value,enabled,type?}]`; reads pairs, flat map, `key|name`, `enabled|disabled|active`, stringifies values, trims keys; rejects non-JSON / bad rows) — `parse_kv_pairs` now built on it. `Db::upsert_request` normalizes headers / bodyPairs / pathVars (covers UI save, bridge, import, duplicate, rename); bridge request upsert errors → 400. UI `pairsToJson` keeps disabled rows; `send()` filters via `pairsForSend(parsePairs(...))`. Headers tab `.pane-warn` for unreadable stored headers. Bridge gets `AppHandle`, emits `bridge-changed` after successful non-GET (not `/v1/run`); new Tauri `get_request`; App listener refreshes workspaces/collections/envs/tree, reloads clean changed tabs (incl. cached closed ones), banner Reload / Keep mine on dirty ones, closes MCP-deleted tabs; save clears the conflict. MCP field docs updated; `inpost-dev-v4`. Live MCP: mixed formats stored canonical, disabled rows not sent, `X-Num: 42` stringified, garbage create + bad update rejected with clear errors. `npm run check` + `cargo test` green.
+**Needs next:** UI clicks not verifiable from the agent (Tauri webview): Send keeps disabled row; MCP edit reloads clean tab; banner on dirty tab. Use "Issue 3 mixed rows (temp)" in "MCP bug check (temp)". Then commit, push, close #3. Out of scope: disabled query params, OpenAPI import `enabled = required`, history effective headers.
+
+### 2026-10-08 — Validated issue #3 against d7376c5
+**User asked:** Validate [#3](https://github.com/sanzgrapher/inpost/issues/3).
+**Did:** Live via `inpost-dev-v3` (temp requests in "MCP bug check (temp)", deleted after). Problem 1 **fixed**: object headers `{"Accept":…,"X-Obj":…}` arrive at httpbin + auto JSON Content-Type. But **no write validation**: MCP stores headersJson verbatim (object kept as object; non-JSON `"Accept: application/json"` saved and run with zero headers, no error). Problem 2 **valid**: `pairsToJson` (`src/App.tsx` ~501) drops `enabled:false` on save; read side (`parsePairs`, Rust `parse_kv_pairs`) already supports objects. Same filter hits query/path pairs. Problem 3 **valid**: no Tauri events; `switchTab`/`openRequest` reuse in-memory `requests` + `tabCache`, `refreshTree` only on collection change/refresh; `save()` upserts the whole draft → overwrites MCP edits. "Never hide unreadable data" **valid**: `parsePairs` catch → blank row. "164/228" not reproducible here (local DB has no object rows; reporter's DB).
+**Needs next:** Fix plan: save headers as `[{key,value,enabled}]`; normalize/reject headersJson in bridge upsert via `parse_kv_pairs`-style parser (400 on non-JSON); UI warning for unparsable; bridge emits `request-changed` → UI reloads non-dirty tabs / warns on dirty.
+
+### 2026-10-08 — Pushed d7376c5; #2 closed
+**User asked:** Push what's solved.
+**Did:** `npm run check` + `cargo test -p inpost` + `tsc` green. Committed `d7376c5` (delete_environment, object-format headers, JSON Content-Type default, `update_request` patch) and pushed `main`. #2 auto-closed via "closes #2"; progress comment on #3. Untracked `install_teamlogger_universal.sh` / `release-notes-v0.1.1.md` left out.
+**Needs next:** #3 remainder (keep disabled headers on save, normalize MCP writes, UI refresh after MCP); #4 AppImage WebKit crash. No new release tag cut.
 
 ### 2026-10-08 — Summarized uncommitted local changes
 **User asked:** What changes are in local so far?

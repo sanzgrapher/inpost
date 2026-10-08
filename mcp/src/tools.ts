@@ -56,9 +56,11 @@ const requestFields = {
     .string()
     .optional()
     .describe(
-      'JSON string. Preferred: [["Accept","application/json"],["X-Id","{{id}}"]]. ' +
-        'Also accepted: {"Accept":"application/json"} or [{"key":"Accept","value":"…","enabled":true}]. ' +
-        "Values support {{envVar}}. Content-Type: application/json is added automatically for bodyType json when not set.",
+      'JSON string. Canonical: [{"key":"Accept","value":"application/json","enabled":true},{"key":"X-Debug","value":"1","enabled":false}]. ' +
+        "enabled:false rows are stored (shown unchecked in the app) but not sent; missing enabled = true. " +
+        'Also accepted and converted on save: [["Accept","application/json"]], {"Accept":"application/json"}, ' +
+        "Postman/Insomnia {key|name,value,disabled}, Hoppscotch {key,value,active}. Anything else is rejected with an error. " +
+        "Keys and values support {{envVar}}. When not set, send adds Content-Type (application/json for json, text/plain for text; urlencoded/multipart always override), Accept: */* and User-Agent: Inpost/<version>. Invalid names (spaces, braces) or values (line breaks) fail the send with an error naming the header.",
     ),
   body: z.string().optional().describe("Raw body for bodyType json/text (supports {{envVar}})."),
   bodyType: z
@@ -71,7 +73,7 @@ const requestFields = {
     .string()
     .optional()
     .describe(
-      'Form fields for urlencoded/multipart: [{"key":"name","value":"Ada","type":"text","enabled":true}] or [["name","Ada"]]. ' +
+      'Form fields for urlencoded/multipart: [{"key":"name","value":"Ada","type":"text","enabled":true}] (same formats and enabled:false rule as headersJson). ' +
         'Multipart type "file" is NOT uploaded yet: the value is sent as plain text.',
     ),
   authType: z
@@ -87,7 +89,7 @@ const requestFields = {
   pathVarsJson: z
     .string()
     .optional()
-    .describe('Values for :id / {id} URL placeholders: [["id","42"]].'),
+    .describe('Values for :id / {id} URL placeholders: [{"key":"id","value":"42"}].'),
 };
 
 const collectionDescriptionParam = z

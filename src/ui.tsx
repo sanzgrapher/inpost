@@ -161,6 +161,7 @@ export function SuggestInput({
   placeholder,
   readOnly,
   className = "",
+  invalid,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -168,6 +169,8 @@ export function SuggestInput({
   placeholder?: string;
   readOnly?: boolean;
   className?: string;
+  /** Error message: red border + tooltip. */
+  invalid?: string | null;
 }) {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
@@ -248,10 +251,15 @@ export function SuggestInput({
   }
 
   return (
-    <div className={`ui-suggest ${className}`.trim()} ref={rootRef}>
+    <div
+      className={`ui-suggest ${invalid ? "invalid" : ""} ${className}`.trim()}
+      ref={rootRef}
+      data-tip={invalid || undefined}
+    >
       <input
         ref={inputRef}
         type="text"
+        aria-invalid={!!invalid || undefined}
         value={value}
         placeholder={placeholder}
         readOnly={readOnly}

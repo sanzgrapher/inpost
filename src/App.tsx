@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, 
 import { createPortal } from "react-dom";
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
@@ -80,6 +81,8 @@ import {
   AUTH_TYPE_OPTIONS,
   BODY_TYPE_OPTIONS,
   COMMON_HEADERS,
+  autoHeaders,
+  headerNameError,
   parseAuthJson,
   parseHistoryHeaders,
   pathVarNames,
@@ -190,6 +193,8 @@ type SendResult = {
   bodyPretty: string | null;
   elapsedMs: number;
   resolvedUrl: string;
+  /** Request headers as sent (auth, body Content-Type, Accept default included). */
+  sentHeaders?: [string, string][];
 };
 type HistoryEntry = {
   id: string;
@@ -497,30 +502,39 @@ function parsePairs(json: string): Pair[] {
   }
 }
 
-/** Headers / query / path — always `[[k,v],…]` for the Rust wire. */
-function pairsToJson(pairs: Pair[]): string {
+/** False when stored pair JSON is a shape `parsePairs` would silently render as empty. */
+function pairsReadable(json: string | null | undefined): boolean {
+  if (!json?.trim()) return true;
+  try {
+    const v = JSON.parse(json) as unknown;
+    if (v === null || (typeof v === "object" && !Array.isArray(v))) return true;
+    return Array.isArray(v) && v.every((row) => row !== null && typeof row === "object");
+  } catch {
+    return false;
+  }
+}
+
+/** Storage form `[{key,value,enabled}]` — disabled rows are kept; only send filters them. */
+function pairsToJson(pairs: Pair[], withType = false): string {
   return JSON.stringify(
     pairs
-      .filter((p) => p.enabled !== false && p.key.trim())
-      .map((p) => [p.key, p.value]),
+      .filter((p) => p.key.trim())
+      .map((p) => ({
+        key: p.key.trim(),
+        value: p.value,
+        enabled: p.enabled !== false,
+        ...(withType ? { type: p.type === "file" ? "file" : "text" } : {}),
+      })),
   );
 }
 
 /** Body form pairs — keep `type` so multipart Text/File survives reload. */
 function bodyPairsToJson(pairs: Pair[]): string {
-  return JSON.stringify(
-    pairs
-      .filter((p) => p.enabled !== false && p.key.trim())
-      .map((p) => ({
-        key: p.key,
-        value: p.value,
-        type: p.type === "file" ? "file" : "text",
-      })),
-  );
+  return pairsToJson(pairs, true);
 }
 
-/** Flatten for send_http_request (`Vec<(String,String)>`). */
-function bodyPairsForSend(pairs: Pair[]): [string, string][] {
+/** Enabled rows flattened for send_http_request (`Vec<(String,String)>`). */
+function pairsForSend(pairs: Pair[]): [string, string][] {
   return pairs
     .filter((p) => p.enabled !== false && p.key.trim())
     .map((p) => [p.key, p.value]);
@@ -2165,6 +2179,8 @@ function App() {
     >
   >({});
   const [savedById, setSavedById] = useState<Record<string, SavedSnap>>({});
+  /** Request ids changed by MCP while the tab had unsaved edits. */
+  const [conflicts, setConflicts] = useState<Record<string, true>>({});
   const [crumbEditing, setCrumbEditing] = useState(false);
   const [crumbDraft, setCrumbDraft] = useState("");
   const urlRef = useRef<HTMLInputElement>(null);
@@ -3408,6 +3424,7 @@ function App() {
       pathVarsJson: pairsToJson(pathPairs),
     };
     const saved = await invoke<HttpRequest>("upsert_request", { request });
+    clearConflict(saved.id);
     const loaded = snapFromRequest(saved);
     setDraft(loaded.draft);
     setHeaders(loaded.headers);
@@ -3635,13 +3652,13 @@ function App() {
         input: {
           method: saved.method,
           url: saved.url,
-          headers: JSON.parse(saved.headersJson || "[]"),
+          headers: pairsForSend(parsePairs(saved.headersJson)),
           body: saved.body || null,
           bodyType: saved.bodyType ?? "none",
-          bodyPairs: bodyPairsForSend(parsePairs(saved.bodyPairsJson || "[]")),
+          bodyPairs: pairsForSend(parsePairs(saved.bodyPairsJson || "[]")),
           authType: saved.authType ?? "none",
           authJson: saved.authJson ?? "{}",
-          pathVars: JSON.parse(saved.pathVarsJson || "[]"),
+          pathVars: pairsForSend(parsePairs(saved.pathVarsJson || "[]")),
           activeVars,
           globalVars,
         },
@@ -3661,7 +3678,14 @@ function App() {
         bodyPretty: res.bodyPretty,
         headers: res.headers,
         requestJson: historyRequestSnapshot(
-          saved,
+          res.sentHeaders
+            ? {
+                ...saved,
+                headersJson: JSON.stringify(
+                  res.sentHeaders.map(([key, value]) => ({ key, value, enabled: true })),
+                ),
+              }
+            : saved,
           res.resolvedUrl || saved.url,
           activeVars,
           globalVars,
@@ -4482,6 +4506,67 @@ function App() {
         break;
     }
   };
+
+  function clearConflict(id: string) {
+    setConflicts((c) => {
+      if (!c[id]) return c;
+      const next = { ...c };
+      delete next[id];
+      return next;
+    });
+  }
+
+  /** Replace a tab's editor state with the stored row (drops any cached edits). */
+  function reloadTab(fresh: HttpRequest) {
+    setTabCache((c) => {
+      const next = { ...c };
+      delete next[fresh.id];
+      return next;
+    });
+    if (fresh.id === selectedId) applyRequest(fresh);
+    else setSavedById((s) => ({ ...s, [fresh.id]: snapFromRequest(fresh).snap }));
+    clearConflict(fresh.id);
+  }
+
+  async function reloadFromDb(id: string) {
+    reloadTab(await invoke<HttpRequest>("get_request", { id }));
+  }
+
+  // MCP writes go through the in-process bridge, which emits `bridge-changed`.
+  const bridgeChangedRef = useRef<(p: { method: string; path: string }) => Promise<void>>(
+    async () => {},
+  );
+  bridgeChangedRef.current = async ({ method, path }) => {
+    await Promise.all([
+      refreshWorkspaces(),
+      refreshCollections(),
+      refreshEnvs(),
+      collectionId ? refreshTree(collectionId) : null,
+    ]);
+    const ids = new Set(
+      [...openTabs, ...Object.keys(tabCache)].filter((id) => !isSpecialTab(id)),
+    );
+    for (const id of ids) {
+      if (method.toLowerCase() === "delete" && path === `/v1/requests/${id}`) {
+        if (openTabs.includes(id)) closeTab(id, false);
+        else dropTabState([id]);
+        continue;
+      }
+      const fresh = await invoke<HttpRequest>("get_request", { id }).catch(() => null);
+      if (!fresh || !snapDirty(savedById[id], snapFromRequest(fresh).snap)) continue;
+      if (tabDirty(id)) setConflicts((c) => ({ ...c, [id]: true }));
+      else reloadTab(fresh);
+    }
+  };
+
+  useEffect(() => {
+    const off = listen<{ method: string; path: string }>("bridge-changed", (e) => {
+      bridgeChangedRef.current(e.payload).catch((err) => setError(String(err)));
+    });
+    return () => {
+      void off.then((f) => f());
+    };
+  }, []);
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -6114,6 +6199,21 @@ function App() {
                 }
               />
 
+              {conflicts[draft.id] && (
+                <div className="pane-warn" role="alert">
+                  <span>
+                    This request was changed outside Inpost (e.g. by MCP) while you had unsaved
+                    edits. Saving now overwrites that change.
+                  </span>
+                  <Button variant="secondary" onClick={() => void reloadFromDb(draft.id)}>
+                    Reload
+                  </Button>
+                  <Button variant="secondary" onClick={() => clearConflict(draft.id)}>
+                    Keep mine
+                  </Button>
+                </div>
+              )}
+
               <div
                 ref={splitRef}
                 className={`editor-split dock-${layoutDock} ${
@@ -6213,14 +6313,48 @@ function App() {
                         )}
                       </div>
                     )}
+                    {reqTab === "headers" && !pairsReadable(draft.headersJson) && (
+                      <div className="pane-warn" role="alert">
+                        <span>
+                          Stored headers couldn’t be read, so none are sent. Saving replaces them
+                          with the table below. Raw value: <code>{draft.headersJson}</code>
+                        </span>
+                      </div>
+                    )}
                     {reqTab === "headers" && (
                       <PairTable
                         pairs={headers}
                         onChange={setHeaders}
                         keyLabel="Header"
                         keySuggestions={COMMON_HEADERS}
+                        validateKey={headerNameError}
                         envHover={envHover}
                       />
+                    )}
+                    {reqTab === "headers" && (
+                      <div className="auto-headers">
+                        <div className="params-label">Sent automatically</div>
+                        {autoHeaders({
+                          headers,
+                          bodyType: asBodyType(draft.bodyType),
+                          body: draft.body,
+                          authType: (draft.authType ?? "none") as AuthType,
+                          authJson: draft.authJson ?? "{}",
+                        }).map((h, i) => (
+                          <div key={`${h.key}-${i}`} className="auto-header-row">
+                            <code>{h.key}</code>
+                            <code>{h.value}</code>
+                            <span className={h.replaces ? "auto-header-note replaces" : "auto-header-note"}>
+                              {h.replaces ? `${h.note} · replaces yours` : h.note}
+                            </span>
+                          </div>
+                        ))}
+                        <div className="auto-header-row">
+                          <code>Host, Content-Length</code>
+                          <code>computed</code>
+                          <span className="auto-header-note">transport</span>
+                        </div>
+                      </div>
                     )}
                     {reqTab === "body" && (
                       <div className="body-pane">

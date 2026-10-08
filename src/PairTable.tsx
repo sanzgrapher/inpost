@@ -24,6 +24,7 @@ export function PairTable({
   readOnly = false,
   tools = false,
   envHover,
+  validateKey,
 }: {
   pairs: Pair[];
   onChange: (next: Pair[]) => void;
@@ -39,6 +40,8 @@ export function PairTable({
   tools?: boolean;
   /** Hover-edit `{{vars}}` in the Value column. */
   envHover?: EnvVarHoverProps;
+  /** Returns an error message for an invalid key (shown inline while typing). */
+  validateKey?: (key: string) => string | null;
 }) {
   const frozen = lockKeys || readOnly;
   const [showDescription, setShowDescription] = useState(false);
@@ -200,6 +203,7 @@ export function PairTable({
                 value={p.key}
                 suggestions={keySuggestions}
                 onChange={(key) => update(i, { key })}
+                invalid={validateKey?.(p.key)}
               />
             ) : (
               <input

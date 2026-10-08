@@ -980,6 +980,13 @@ impl Db {
     }
 
     pub fn upsert_request(&self, mut req: HttpRequest) -> Result<HttpRequest, String> {
+        use inpost_core::httputil::normalize_pairs;
+        req.headers_json =
+            normalize_pairs(&req.headers_json).map_err(|e| format!("headersJson: {e}"))?;
+        req.body_pairs_json =
+            normalize_pairs(&req.body_pairs_json).map_err(|e| format!("bodyPairsJson: {e}"))?;
+        req.path_vars_json =
+            normalize_pairs(&req.path_vars_json).map_err(|e| format!("pathVarsJson: {e}"))?;
         let conn = self.0.lock().map_err(|e| e.to_string())?;
         let existing: Option<(Option<String>, i64)> = conn
             .query_row(

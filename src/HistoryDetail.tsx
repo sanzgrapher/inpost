@@ -139,11 +139,6 @@ function queryFromUrl(url: string): Pair[] {
   return query.length ? query : [{ key: "", value: "", enabled: true }];
 }
 
-function pairsFromHeaders(headers: [string, string][]): Pair[] {
-  if (!headers.length) return [{ key: "", value: "", enabled: true }];
-  return headers.map(([key, value]) => ({ key, value, enabled: true }));
-}
-
 function filledCount(pairs: Pair[]) {
   return pairs.filter((p) => p.key || p.value).length;
 }
@@ -215,14 +210,9 @@ export function HistoryDetail({
   const [bodyView, setBodyView] = useState<"pretty" | "raw">(
     entry.bodyPretty ? "pretty" : "raw",
   );
-  const resHeaders = useMemo(
-    () => pairsFromHeaders(parseHistoryHeaders(entry.headersJson)),
-    [entry.headersJson],
-  );
-  const reqHeaders = useMemo(
-    () => toPairs(substituteInPairsJson(snap?.headers, activeVars, globalVars)),
-    [snap, activeVars, globalVars],
-  );
+  const resHeaders = useMemo(() => parseHistoryHeaders(entry.headersJson), [entry.headersJson]);
+  // Recorded as sent (already resolved); re-substituting would show today's env.
+  const reqHeaders = useMemo(() => toPairs(snap?.headers), [snap]);
   const pathPairs = useMemo(
     () => toPairs(substituteInPairsJson(snap?.pathVars, activeVars, globalVars)),
     [snap, activeVars, globalVars],
@@ -570,9 +560,7 @@ export function HistoryDetail({
                     onClick={() => setResTab("headers")}
                   >
                     Headers
-                    {filledCount(resHeaders)
-                      ? ` (${filledCount(resHeaders)})`
-                      : ""}
+                    {resHeaders.length ? ` (${resHeaders.length})` : ""}
                   </button>
                 </div>
                 <div className="response-actions">
@@ -590,12 +578,16 @@ export function HistoryDetail({
                 </div>
               </div>
               {resTab === "headers" && (
-                <PairTable
-                  pairs={resHeaders}
-                  onChange={noop}
-                  keyLabel="Header"
-                  readOnly
-                />
+                <div className="kv-table read-only">
+                  {resHeaders.map(([k, v], i) => (
+                    <div className="kv-row" key={i}>
+                      <span />
+                      <code>{k}</code>
+                      <code>{v}</code>
+                      <span />
+                    </div>
+                  ))}
+                </div>
               )}
               {resTab === "body" && (
                 <>

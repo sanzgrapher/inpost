@@ -126,6 +126,44 @@ export function parseAuthJson(json: string): {
   }
 }
 
+/** Same token rule `http_exec::send` enforces; `{{vars}}` count as valid (resolved at send). */
+export function headerNameError(name: string): string | null {
+  const n = name.trim().replace(/\{\{[^}]*\}\}/g, "x");
+  if (!n || /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(n)) return null;
+  return "Invalid header name: use letters, digits and !#$%&'*+-.^_`|~ only (no spaces or braces)";
+}
+
+export type AutoHeader = { key: string; value: string; note: string; replaces: boolean };
+
+/** Headers `http_exec::send` adds at send time; mirror of the Rust rules, keep in sync. */
+export function autoHeaders(r: {
+  headers: Pair[];
+  bodyType: BodyType;
+  body: string;
+  authType: AuthType;
+  authJson: string;
+}): AutoHeader[] {
+  const has = (name: string) =>
+    r.headers.some((p) => p.enabled !== false && p.key.trim().toLowerCase() === name.toLowerCase());
+  const out: AutoHeader[] = [];
+  const add = (key: string, value: string, note: string) =>
+    out.push({ key, value, note, replaces: has(key) });
+  const auth = parseAuthJson(r.authJson);
+  if (r.authType === "bearer" && auth.token) add("Authorization", `Bearer ${auth.token}`, "Auth tab");
+  if (r.authType === "basic" && (auth.username || auth.password))
+    add("Authorization", "Basic <base64 username:password>", "Auth tab");
+  if (r.authType === "apikey" && auth.key && (auth.in ?? "header") !== "query")
+    add(auth.key, auth.value ?? "", "Auth tab");
+  if (r.bodyType === "urlencoded")
+    add("Content-Type", "application/x-www-form-urlencoded", "body type");
+  if (r.bodyType === "multipart") add("Content-Type", "multipart/form-data; boundary=…", "body type");
+  const defaultCt = r.bodyType === "json" ? "application/json" : r.bodyType === "text" ? "text/plain" : null;
+  if (defaultCt && r.body !== "" && !has("Content-Type")) add("Content-Type", defaultCt, `${r.bodyType} body`);
+  if (!has("Accept")) add("Accept", "*/*", "default");
+  if (!has("User-Agent")) add("User-Agent", "Inpost/<version>", "default");
+  return out;
+}
+
 export function parseHistoryHeaders(
   headersJson: string | null | undefined,
 ): [string, string][] {
@@ -159,5 +197,35 @@ if (typeof process !== "undefined" && process.argv[1]?.includes("reqMeta")) {
   console.assert(h.some((p) => p.key === "Content-Type" && p.value === "application/json"));
   const none = syncContentType(h, "none");
   console.assert(!none.some((p) => p.key.toLowerCase() === "content-type"));
+  const mp = autoHeaders({
+    headers: [{ key: "Content-Type", value: "application/jsons", enabled: true }],
+    bodyType: "multipart",
+    body: "",
+    authType: "bearer",
+    authJson: '{"token":"t"}',
+  });
+  console.assert(
+    mp.find((h) => h.key === "Content-Type")?.replaces === true,
+    "multipart replaces user Content-Type",
+  );
+  console.assert(mp.some((h) => h.key === "Authorization" && h.value === "Bearer t"));
+  console.assert(mp.some((h) => h.key === "Accept" && !h.replaces));
+  const js = autoHeaders({
+    headers: [
+      { key: "Content-Type", value: "text/x", enabled: true },
+      { key: "Accept", value: "a", enabled: false },
+    ],
+    bodyType: "json",
+    body: "{}",
+    authType: "none",
+    authJson: "{}",
+  });
+  console.assert(!js.some((h) => h.key === "Content-Type"), "user JSON Content-Type wins");
+  console.assert(js.some((h) => h.key === "Accept"), "disabled Accept doesn't count");
+  const tx = autoHeaders({ headers: [], bodyType: "text", body: "hi", authType: "none", authJson: "{}" });
+  console.assert(tx.some((h) => h.key === "Content-Type" && h.value === "text/plain"), "text default CT");
+  console.assert(tx.some((h) => h.key === "User-Agent"), "default User-Agent");
+  console.assert(!headerNameError("X-Api_Key.v2") && !headerNameError("") && !headerNameError("{{hdr}}"));
+  console.assert(!!headerNameError("X Bad") && !!headerNameError("X:Y") && !!headerNameError("{x}"));
   console.log("reqMeta self-check ok");
 }

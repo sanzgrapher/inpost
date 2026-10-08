@@ -150,7 +150,7 @@ export function EnvVarPop({
 
   const popStyle = {
     top: hover.rect.bottom + 6,
-    left: Math.min(hover.rect.left, window.innerWidth - 320 - 8),
+    left: Math.min(hover.rect.left, window.innerWidth - 380 - 8),
   };
 
   return createPortal(
@@ -349,7 +349,7 @@ export function VarField({
 
   function renderHit(): ReactNode {
     return tokens.map((tok, i) => {
-      if (tok.kind === "text") return <span key={i} />;
+      if (tok.kind === "text") return <span key={i}>{tok.text}</span>;
       const miss =
         resolveVar(tok.name, activeMap, globalMap).source === "missing";
       return (

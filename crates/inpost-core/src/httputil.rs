@@ -26,48 +26,95 @@ pub fn encode_urlencoded(pairs: &[(String, String)]) -> String {
         .join("&")
 }
 
-/// Accepts `[[k,v],…]`, `[{key,value,type?,enabled?},…]`, and a flat `{"k":"v",…}` map.
-pub fn parse_kv_pairs(json: &str) -> Vec<(String, String)> {
-    let Ok(val) = serde_json::from_str::<Value>(json) else {
-        return Vec::new();
-    };
-    if let Some(map) = val.as_object() {
-        return map
-            .iter()
-            .filter(|(k, _)| !k.is_empty())
-            .map(|(k, v)| (k.clone(), v.as_str().map_or_else(|| v.to_string(), str::to_string)))
-            .collect();
+/// One key/value row (headers, path vars, form body). Canonical JSON: `{key,value,enabled,type?}`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct KvRow {
+    pub key: String,
+    pub value: String,
+    pub enabled: bool,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+}
+
+fn scalar_text(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Null => String::new(),
+        other => other.to_string(),
     }
-    let Some(arr) = val.as_array() else {
-        return Vec::new();
+}
+
+/// Reads every row shape agents and other clients write:
+/// `[[k,v,type?]]`, `[{key|name, value, enabled|disabled|active, type?}]`, flat `{"k":"v"}`,
+/// and `""` / `null` as empty. Missing enabled flag = enabled. Empty keys are dropped.
+pub fn kv_rows(json: &str) -> Result<Vec<KvRow>, String> {
+    if json.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let val: Value = serde_json::from_str(json).map_err(|e| {
+        format!(
+            "not valid JSON ({e}); expected [{{\"key\":\"Accept\",\"value\":\"application/json\",\"enabled\":true}}]"
+        )
+    })?;
+    let rows = match val {
+        Value::Null => Vec::new(),
+        Value::Object(map) => map
+            .iter()
+            .map(|(k, v)| KvRow {
+                key: k.trim().to_string(),
+                value: scalar_text(v),
+                enabled: true,
+                kind: None,
+            })
+            .collect(),
+        Value::Array(items) => items
+            .iter()
+            .enumerate()
+            .map(|(i, item)| match item {
+                Value::Array(a) => Ok(KvRow {
+                    key: a.first().map(scalar_text).unwrap_or_default().trim().to_string(),
+                    value: a.get(1).map(scalar_text).unwrap_or_default(),
+                    enabled: true,
+                    kind: a.get(2).and_then(Value::as_str).map(str::to_string),
+                }),
+                Value::Object(o) => {
+                    let flag = |k: &str| o.get(k).and_then(Value::as_bool);
+                    Ok(KvRow {
+                        key: o
+                            .get("key")
+                            .or_else(|| o.get("name"))
+                            .map(scalar_text)
+                            .unwrap_or_default()
+                            .trim()
+                            .to_string(),
+                        value: o.get("value").map(scalar_text).unwrap_or_default(),
+                        enabled: flag("enabled")
+                            .or_else(|| flag("disabled").map(|d| !d))
+                            .or_else(|| flag("active"))
+                            .unwrap_or(true),
+                        kind: o.get("type").and_then(Value::as_str).map(str::to_string),
+                    })
+                }
+                _ => Err(format!("row {i} must be [key, value] or {{\"key\",\"value\"}}")),
+            })
+            .collect::<Result<_, _>>()?,
+        _ => return Err("expected a JSON array of {key,value,enabled} rows".into()),
     };
-    arr.iter()
-        .filter_map(|item| {
-            if let Some(a) = item.as_array() {
-                let k = a.first()?.as_str()?.to_string();
-                if k.is_empty() {
-                    return None;
-                }
-                let v = a.get(1).and_then(|x| x.as_str()).unwrap_or("").to_string();
-                return Some((k, v));
-            }
-            if let Some(o) = item.as_object() {
-                if o.get("enabled").and_then(|x| x.as_bool()) == Some(false) {
-                    return None;
-                }
-                let k = o.get("key")?.as_str()?.to_string();
-                if k.is_empty() {
-                    return None;
-                }
-                let v = o
-                    .get("value")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                return Some((k, v));
-            }
-            None
-        })
+    Ok(rows.into_iter().filter(|r| !r.key.is_empty()).collect())
+}
+
+/// Canonical storage form `[{key,value,enabled,type?}]`; `Err` for anything unreadable.
+pub fn normalize_pairs(json: &str) -> Result<String, String> {
+    serde_json::to_string(&kv_rows(json)?).map_err(|e| e.to_string())
+}
+
+/// Enabled `(key, value)` rows for the wire; unreadable JSON → none.
+pub fn parse_kv_pairs(json: &str) -> Vec<(String, String)> {
+    kv_rows(json)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| r.enabled)
+        .map(|r| (r.key, r.value))
         .collect()
 }
 
@@ -425,6 +472,33 @@ mod tests {
         );
         let d = parse_kv_pairs(r#"[{"key":"a","value":"1","enabled":false},{"key":"b","value":"2"}]"#);
         assert_eq!(d, vec![("b".into(), "2".into())]);
+    }
+
+    #[test]
+    fn normalize_pairs_shapes() {
+        let canon = r#"[{"key":"Accept","value":"application/json","enabled":true}]"#;
+        for input in [
+            r#"[["Accept","application/json"]]"#,
+            r#"{"Accept":"application/json"}"#,
+            r#"[{"key":" Accept ","value":"application/json"}]"#,
+            r#"[{"name":"Accept","value":"application/json","disabled":false}]"#,
+            r#"[{"key":"Accept","value":"application/json","active":true},{"key":"","value":"x"}]"#,
+        ] {
+            assert_eq!(normalize_pairs(input).unwrap(), canon, "{input}");
+        }
+        assert_eq!(normalize_pairs("").unwrap(), "[]");
+        assert_eq!(normalize_pairs("{}").unwrap(), "[]");
+        assert_eq!(
+            normalize_pairs(r#"[{"key":"X","value":3,"disabled":true}]"#).unwrap(),
+            r#"[{"key":"X","value":"3","enabled":false}]"#
+        );
+        assert_eq!(
+            normalize_pairs(r#"[["avatar","a.png","file"]]"#).unwrap(),
+            r#"[{"key":"avatar","value":"a.png","enabled":true,"type":"file"}]"#
+        );
+        assert!(normalize_pairs("Accept: application/json").is_err());
+        assert!(normalize_pairs(r#""Accept""#).is_err());
+        assert!(normalize_pairs(r#"["Accept"]"#).is_err());
     }
 
     #[test]
