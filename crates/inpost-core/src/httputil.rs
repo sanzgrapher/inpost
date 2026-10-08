@@ -26,11 +26,18 @@ pub fn encode_urlencoded(pairs: &[(String, String)]) -> String {
         .join("&")
 }
 
-/// Accepts legacy `[[k,v],…]` and object `[{key,value,type?},…]` body pair JSON.
+/// Accepts `[[k,v],…]`, `[{key,value,type?,enabled?},…]`, and a flat `{"k":"v",…}` map.
 pub fn parse_kv_pairs(json: &str) -> Vec<(String, String)> {
     let Ok(val) = serde_json::from_str::<Value>(json) else {
         return Vec::new();
     };
+    if let Some(map) = val.as_object() {
+        return map
+            .iter()
+            .filter(|(k, _)| !k.is_empty())
+            .map(|(k, v)| (k.clone(), v.as_str().map_or_else(|| v.to_string(), str::to_string)))
+            .collect();
+    }
     let Some(arr) = val.as_array() else {
         return Vec::new();
     };
@@ -45,6 +52,9 @@ pub fn parse_kv_pairs(json: &str) -> Vec<(String, String)> {
                 return Some((k, v));
             }
             if let Some(o) = item.as_object() {
+                if o.get("enabled").and_then(|x| x.as_bool()) == Some(false) {
+                    return None;
+                }
                 let k = o.get("key")?.as_str()?.to_string();
                 if k.is_empty() {
                     return None;
@@ -405,6 +415,16 @@ mod tests {
                 ("name".into(), "Ada".into())
             ]
         );
+        let c = parse_kv_pairs(r#"{"Accept":"application/json","X-Count":3}"#);
+        assert_eq!(
+            c,
+            vec![
+                ("Accept".into(), "application/json".into()),
+                ("X-Count".into(), "3".into())
+            ]
+        );
+        let d = parse_kv_pairs(r#"[{"key":"a","value":"1","enabled":false},{"key":"b","value":"2"}]"#);
+        assert_eq!(d, vec![("b".into(), "2".into())]);
     }
 
     #[test]

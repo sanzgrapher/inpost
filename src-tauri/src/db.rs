@@ -1587,6 +1587,32 @@ mod tests {
             .is_active);
     }
 
+    #[test]
+    fn delete_environment_guards_global_and_reactivates() {
+        let db = mem_db();
+        let ws = db.list_workspaces().unwrap()[0].id.clone();
+        let envs = db.list_environments(Some(ws.clone())).unwrap();
+        let global = envs.iter().find(|e| e.is_global).unwrap();
+        let local = envs.iter().find(|e| !e.is_global).unwrap();
+        assert!(db.delete_environment(&global.id).is_err());
+        assert!(db.delete_environment("nope").is_err());
+
+        let prod = db
+            .upsert_environment(Environment {
+                id: Uuid::new_v4().to_string(),
+                name: "Prod".into(),
+                workspace_id: ws.clone(),
+                is_global: false,
+                is_active: true,
+                vars_json: "{}".into(),
+            })
+            .unwrap();
+        db.delete_environment(&prod.id).unwrap();
+        let after = db.list_environments(Some(ws)).unwrap();
+        assert!(after.iter().all(|e| e.id != prod.id));
+        assert!(after.iter().find(|e| e.id == local.id).unwrap().is_active);
+    }
+
     fn hist(workspace_id: String, created_at: i64) -> HistoryEntry {
         HistoryEntry {
             id: Uuid::new_v4().to_string(),

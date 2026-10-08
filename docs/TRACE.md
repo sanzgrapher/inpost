@@ -2,7 +2,7 @@
 
 **Purpose:** Living log so any new chat stays on track. Agents **read this first**, then **append** after each user request they work on.
 
-**Last updated:** 2026-09-25 (v0.1.1 release)
+**Last updated:** 2026-10-08 (#2 delete_environment done; #3 / #4 triaged)
 
 ---
 
@@ -21,6 +21,7 @@
 | **MCP ref** | Localhost bridge + `session.json` + bundled `stdio.mjs`; Requestly MCP *packaging* (open MIT SDK) |
 | **Run** | `npm run build:mcp && npm run tauri dev` (or `npm run tauri dev` which runs build:mcp first) |
 | **Check** | `npm run check` → `cargo test -p inpost-core` + `src/searchQuery.ts` / `src/shortcuts.ts` / `src/workspaceSession.ts` / `src/envVar.ts` / `src/envSync.ts` / `src/reqMeta.ts` / `src/tabClose.ts` self-checks |
+| **Dev MCP (WSL)** | `inpost-dev-v3` in `~/.cursor/mcp.json` → dev data dir `stdio.mjs`; bump `vN` after every `mcp/src` change (see AGENTS.md). Windows prod = `inpost` in Windows config |
 | **MCP config** | Keep app open; point Cursor at `~/.local/share/com.inpost.desktop/mcp/stdio.mjs` (Linux) / `%APPDATA%\com.inpost.desktop\mcp\stdio.mjs` (Windows) — or copy from **Settings → MCP** |
 
 ### Key docs
@@ -39,7 +40,9 @@
 - [ ] In-app auto-update (`tauri-plugin-updater` + release update JSON; needs signing keys) — Option B
 - [x] Notify-only update check (Option A): toast + Settings → Check / Download → GitHub Releases
 - [ ] Scripts / Tests / Debug tabs, OAuth/JWT, cookies, Timeline, GraphQL, binary body (deferred)
-- [ ] Auth inherit-from-folder; multipart file bytes on the wire (UI Text/File done)
+- [x] [#2](https://github.com/sanzgrapher/inpost/issues/2) MCP `delete_environment` (verified live; commit + close issue pending)
+- [ ] [#3](https://github.com/sanzgrapher/inpost/issues/3) headers (commit object fix, keep disabled, normalize MCP writes, UI refresh) · [#4](https://github.com/sanzgrapher/inpost/issues/4) AppImage WebKit SIGABRT
+- [ ] Auth inherit-from-folder; multipart file bytes on the wire (UI Text/File done) — [#1](https://github.com/sanzgrapher/inpost/issues/1)
 - [ ] Docs polish: image upload/paste, per-folder descriptions, "View complete documentation" collection page listing all requests (Postman-style)
 
 ---
@@ -68,10 +71,67 @@
 
 ## Trace log (newest first)
 
+### 2026-10-08 — Summarized uncommitted local changes
+**User asked:** What changes are in local so far?
+**Did:** Listed the uncommitted diff (10 files): Oct 1 header/Content-Type fixes, `update_request` PATCH + typed MCP request fields, #2 `delete_environment`, AGENTS.md dev-MCP note. Untracked: `install_teamlogger_universal.sh` (unrelated, don't commit), `release-notes-v0.1.1.md` (delete once notes applied).
+**Needs next:** Commit + close #2; then #3 / #4.
+
+### 2026-10-08 — #2 verified live via `inpost-dev-v3`
+**User asked:** User restarted WSL and bumped dev MCP to `inpost-dev-v3` ("done").
+**Did:** WSLg back (`wayland-0` present, load ~2); `tauri dev` up. In temp workspace "MCP bug check (temp)": created active env "Delete me (temp)" → `delete_environment` → `{ok:true}`, gone from list, `Local` re-activated; deleting Global → "cannot delete the global environment".
+**Needs next:** Commit #2 + Oct 1 header fixes; close [#2](https://github.com/sanzgrapher/inpost/issues/2). Remaining: #3, #4.
+
+### 2026-10-08 — #2 MCP `delete_environment`
+**User asked:** Fix issue #2 (picked from the triage below).
+**Did:** Bridge `DELETE /v1/environments/{id}` → existing `Db::delete_environment` (400 on Global / unknown id). MCP tool `delete_environment({ environmentId })` in `mcp/src/tools.ts` — no `workspaceId` (env ids are UUIDs; db looks up the workspace). Test `delete_environment_guards_global_and_reactivates` in `src-tauri/src/db.rs` (passes). Rebuilt `stdio.mjs`; `~/.cursor/mcp.json` bumped to `inpost-dev-v2`. Live MCP check blocked: `tauri dev` panics "Failed to initialize GTK" — WSLg hung again (empty `/mnt/wslg/runtime-dir`, load ~39); no `xvfb-run` installed.
+**Needs next:** Restart WSL VM (`wsl --shutdown`), `npm run tauri dev`, then call `inpost-dev-v2` `delete_environment` live and close #2. Uncommitted together with the Oct 1 header fixes. Remaining: #3, #4.
+
+### 2026-10-08 — Triage today's GitHub issues #2 / #3 / #4
+**User asked:** Check today's reported issues (MCP delete env, headers, Linux crash).
+**Did:** Triage only, no code changes. [#2](https://github.com/sanzgrapher/inpost/issues/2) MCP `delete_environment`: `Db::delete_environment` + Tauri cmd already exist (refuses Global, re-activates first non-global if active deleted) — only missing bridge `DELETE /v1/environments/{id}` + MCP tool. [#3](https://github.com/sanzgrapher/inpost/issues/3) Headers: (1) object-format read is fixed **locally but uncommitted** (v0.1.1 shipped without it); MCP still stores whatever string it gets (no normalize/validate on write). (2) Disabled headers lost: `pairsToJson` in `src/App.tsx` filters `enabled:false` before save — real bug; `parsePairs` + Rust `parse_kv_pairs` (uncommitted) already understand `{key,value,enabled}`. (3) No UI refresh after MCP writes: no Tauri events anywhere — real gap. [#4](https://github.com/sanzgrapher/inpost/issues/4) AppImage `WebKitWebProcess` SIGABRT on Arch/Hyprland: AppImage bundles Ubuntu 22.04 WebKitGTK (`release.yml` runner) onto a much newer Mesa/Wayland stack; known Tauri/WebKitGTK class of crash (DMABUF renderer). No reload on `web-process-terminated`, so the window goes dead.
+**Needs next:** User pick which to fix. Suggested: #2 (small), #3 parts 1+2 (commit + save disabled as objects + normalize on MCP write), #4 env-var workaround (`WEBKIT_DISABLE_DMABUF_RENDERER=1`) + reload webview on web-process crash; #3 part 3 (bridge emits change event → UI reloads non-dirty tabs) is bigger.
+
+### 2026-10-01 — Dev MCP renamed `inpost-dev-v1` + version-bump convention
+**User asked:** WSL Cursor's InPost MCP must use the dev build (not the Windows prod app) and be named `inpost-dev-vN`, bumping N on each MCP change so Cursor loads it without a refresh.
+**Did:** `~/.cursor/mcp.json`: `inpost-devs` → `inpost-dev-v1` (already pointed at the WSL dev data dir, not `/mnt/c/...`). Windows `inpost` entry untouched. Documented the bump flow in `AGENTS.md` + Current status.
+Verified in a fresh Cursor load: `inpost-dev-v1` shows the PATCH `update_request`; url-only patch kept method/body, run hit the new URL. "fetch failed" = dev app not running (closing the window ends `tauri dev`).
+**Needs next:** Next `mcp/src` change → `inpost-dev-v2`.
+
+### 2026-10-01 — Live re-test of the 3 reported MCP bugs
+**User asked:** Check whether the reported issues are fixed.
+**Did:** Via `inpost-devs` MCP against httpbin.org/anything in temp workspace "MCP bug check (temp)". Bug 1 (object headers dropped) **fixed**: `{"X-Api-Key":…,"Accept":…}` both arrive + auto `Content-Type: application/json`. Bug 2 (update ignored): a valid `update_request` applies on the next run; but omitting `collectionId` fails zod validation ("collectionId Required") and the next run uses old values — likely the reporter's actual symptom. Full-replace also silently drops omitted fields (old `Accept` vanished). Bug 3 (multipart file) **still open**: `cover` sent as form text of the path, `files: {}` → [#1](https://github.com/sanzgrapher/inpost/issues/1).
+Then (user approved) `update_request` is now a **patch** in `mcp/src/tools.ts`: GET existing row, overlay only defined args; `collectionId`/`name`/`method`/`url` optional; body on a `none` request flips to json. Verified live by driving the new `stdio.mjs` over JSON-RPC: url-only patch keeps method/headers/body/name; `headersJson:"[]"` clears; next run uses patched row. Bundle rebuilt + deployed to app data dir.
+**Needs next:** Reload InPost MCP in Cursor to pick up the patch tool. Delete temp workspace "MCP bug check (temp)" from UI (no MCP delete_workspace). Multipart file bytes → #1. All fixes uncommitted.
+
+### 2026-10-01 — WSL VM restarted; tauri dev runs again
+**User asked:** Follow-up on the GTK crash / deferred `wsl --shutdown`.
+**Did:** Confirmed full VM restart (kernel uptime 2 min, load ~0.7, `/mnt/wslg/runtime-dir/wayland-0` + `/tmp/.X11-unix/X0` present). `npm run tauri dev` starts with no GTK panic (only harmless libEGL/ZINK warnings → software rendering). Cleaned up duplicate/orphan `inpost` processes from overlapping runs; one instance + Vite on 1420 now. InPost MCP (`inpost-devs`) answers `list_collections`; no "Book Playgrounds" collection exists locally (it was from the external bug report).
+**Needs next:** Header fix still only covered by `parse_kv_pairs_tuple_and_object` test; reporter should confirm on their data. Code fixes still uncommitted.
+
+### 2026-10-01 — GTK crash persists after WSL restart (WSLg hung)
+**User asked:** `npm run tauri dev` still panics "Failed to initialize GTK" after the restart.
+**Did:** Diagnosis only. Distro restarted (11:41) but kernel uptime is 1 day and load avg ~80, so the WSL VM itself never restarted. In the WSLg system distro (`wsl.exe --system`), `WSLGd` is stuck in D state (uninterruptible I/O) and weston never launched → `/mnt/wslg/.X11-unix` + `runtime-dir` empty. Not an InPost issue.
+**Needs next:** Full VM restart from Windows (`wsl --shutdown`, confirm all distros Stopped; else `taskkill /f /im wslservice.exe` or reboot). Then verify `ls /mnt/wslg/runtime-dir` shows `wayland-0` before `npm run tauri dev`. User deferred the restart (`--shutdown` kills their other distros). Fallbacks if needed sooner: VcXsrv on Windows + `DISPLAY=localhost:0 GDK_BACKEND=x11 WAYLAND_DISPLAY=` (mirrored networking), or `xvfb-run -a` for headless MCP testing.
+
+### 2026-10-01 — Fix MCP header/Content-Type bugs + multipart issue + GTK crash
+**User asked:** Apply the triage fixes, file a multipart feature request, and run tauri (GTK init panic).
+**Did:** `httputil::parse_kv_pairs` now also accepts a flat `{"k":"v"}` map and skips `enabled:false` rows; bridge `run_request` uses it for headers + path vars, OpenAPI export uses it for headers (no more silent drop). `http_exec::send` adds `Content-Type: application/json` for `bodyType: json` when absent. UI `parsePairs` reads object-map headers. MCP `create_request`/`update_request` share documented `requestFields` (enum `bodyType`/`authType`, formats for headers/bodyPairs/auth/pathVars, multipart-file caveat); `update_request` description warns it's a full replace. Test asserts in `parse_kv_pairs_tuple_and_object`. Filed [#1](https://github.com/sanzgrapher/inpost/issues/1) (multipart file bytes). GTK panic = WSLg compositor not running (empty `/mnt/wslg/runtime-dir`, no X0 socket) — needs `wsl --shutdown` from Windows; not a code issue.
+**Needs next:** After WSL restart: `npm run tauri dev`, then re-run the Book Playgrounds saved requests to confirm object headers now send. Multipart file bytes → issue #1.
+
+### 2026-10-01 — Triage external MCP bug report (headers / update / multipart)
+**User asked:** Is a pasted 3-bug report (object headers dropped, update_request ignored, multipart file sends path) our problem or user error?
+**Did:** Code triage only. Bug 1 real: `bridge::run_request` parses `headers_json` as strict `Vec<(String,String)>` → object `{}` fails → `unwrap_or_default()` → no headers, while history `sub_pairs` echoes the object back (misleading). MCP `headersJson` has no format docs. Also `resolve_body("json")` never sets `Content-Type: application/json`. Bug 2: no code path found (PUT → upsert → `get_request`); note `update_request` is full-replace (omitted headers/body/auth reset to defaults). Bug 3 real + already backlog; `form-data` isn't a bodyType (valid: none/json/text/urlencoded/multipart).
+**Needs next:** If approved: parse headers via shared `parse_kv_pairs` (+ accept object map), default JSON Content-Type, document `headersJson`/`bodyType`/`bodyPairsJson` in MCP tool schema; multipart file bytes stays backlog.
+
+### 2026-09-25 — What’s left (status)
+**User asked:** What’s remaining in this project?
+**Did:** Summarized from TRACE backlog — Phase 0–2 + notify-only updates done; next is Phase 3 sync spike; then Phase 4, signing/notarization, Option B updater, deferred editor/auth/docs items; v0.1.1 notes apply still pending if Actions/gh not finished.
+**Needs next:** User pick — Phase 3 spike vs release polish (signing / Option B / notes).
+
 ### 2026-09-25 — Push + cut v0.1.1
 **User asked:** Push and make a new release; keep notes to 1–3 short statements + collapsible changelog (Feature / Fix / …).
-**Did:** Bumped `0.1.0`→`0.1.1` (package/tauri/Cargo); `release.yml` drops auto-generated long notes; commit update-check + About GitHub; push main + tag `v0.1.1`; set short release body with `<details>` changelog.
-**Needs next:** Watch release matrix; Option B still backlog; Phase 3 sync.
+**Did:** Bumped `0.1.0`→`0.1.1` (package/tauri/Cargo/lock); `release.yml` sets `generateReleaseNotes: false` + short placeholder; committed update-check + About GitHub; pushed `main` + annotated tag `v0.1.1` (remote has tag). Short notes drafted in `release-notes-v0.1.1.md` (1 paragraph + collapsible Feature/Fix changelog). Could not run `gh release edit` here — local `gh` token invalid / API HTTPS blocked in this environment.
+**Needs next:** Confirm Actions release matrix green; apply notes with `gh release edit v0.1.1 --notes-file release-notes-v0.1.1.md` after `gh auth login` if needed. Then delete the notes file from the tree (untracked).
 
 ### 2026-09-24 — About: logo + GitHub repo
 **User asked:** Add GitHub URL and logo as well as the repo.

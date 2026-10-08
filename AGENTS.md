@@ -34,3 +34,7 @@ Not lazy about: understanding the problem (read it fully and trace the real flow
 ## Session continuity
 
 Read and update **`docs/TRACE.md`** every session (status, backlog, append trace). Rule: `.cursor/rules/trace.mdc`.
+
+## Dev MCP server name
+
+Cursor in WSL uses `inpost-dev-vN` in `~/.cursor/mcp.json` → the dev build's `~/.local/share/com.inpost.desktop/mcp/stdio.mjs` (the Windows prod app is `inpost` in the Windows config; never point the dev entry there). After changing `mcp/src/**`: `npm run build:mcp`, let `tauri dev` relaunch (it copies the bundle on launch), then bump `N` by one so Cursor spawns the new server without a manual reload.

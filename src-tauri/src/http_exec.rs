@@ -91,6 +91,11 @@ pub fn send(input: SendRequestInput) -> Result<SendRequestResult, String> {
     let (wire_body, ct_override) = httputil::resolve_body(&input.body_type, &body_sub, &pairs);
     if let Some(ref ct) = ct_override {
         httputil::set_content_type(&mut headers, Some(ct));
+    } else if input.body_type == "json"
+        && wire_body.is_some()
+        && !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+    {
+        headers.push(("Content-Type".into(), "application/json".into()));
     }
 
     let url = envsubst::substitute(&url_with_auth, &input.active_vars, &input.global_vars);

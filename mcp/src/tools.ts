@@ -51,6 +51,45 @@ const descriptionParam = z
       DOC_FIELD_GUIDE,
   );
 
+const requestFields = {
+  headersJson: z
+    .string()
+    .optional()
+    .describe(
+      'JSON string. Preferred: [["Accept","application/json"],["X-Id","{{id}}"]]. ' +
+        'Also accepted: {"Accept":"application/json"} or [{"key":"Accept","value":"…","enabled":true}]. ' +
+        "Values support {{envVar}}. Content-Type: application/json is added automatically for bodyType json when not set.",
+    ),
+  body: z.string().optional().describe("Raw body for bodyType json/text (supports {{envVar}})."),
+  bodyType: z
+    .enum(["none", "json", "text", "urlencoded", "multipart"])
+    .optional()
+    .describe(
+      "Defaults to json when body is given, else none. urlencoded/multipart read bodyPairsJson and set Content-Type themselves.",
+    ),
+  bodyPairsJson: z
+    .string()
+    .optional()
+    .describe(
+      'Form fields for urlencoded/multipart: [{"key":"name","value":"Ada","type":"text","enabled":true}] or [["name","Ada"]]. ' +
+        'Multipart type "file" is NOT uploaded yet: the value is sent as plain text.',
+    ),
+  authType: z
+    .enum(["none", "bearer", "basic", "apikey"])
+    .optional()
+    .describe("Defaults to none."),
+  authJson: z
+    .string()
+    .optional()
+    .describe(
+      'bearer: {"token":"…"} · basic: {"username":"…","password":"…"} · apikey: {"key":"X-Api-Key","value":"…","in":"header"|"query"}. Supports {{envVar}}.',
+    ),
+  pathVarsJson: z
+    .string()
+    .optional()
+    .describe('Values for :id / {id} URL placeholders: [["id","42"]].'),
+};
+
 const collectionDescriptionParam = z
   .string()
   .describe(
@@ -222,13 +261,7 @@ export function registerTools(server: McpServer) {
       description: descriptionParam,
       method: z.string().default("GET"),
       url: z.string().min(1),
-      headersJson: z.string().optional(),
-      body: z.string().optional(),
-      bodyType: z.string().optional(),
-      bodyPairsJson: z.string().optional(),
-      authType: z.string().optional(),
-      authJson: z.string().optional(),
-      pathVarsJson: z.string().optional(),
+      ...requestFields,
       folderId: z.string().optional(),
     },
     async (args) => {
@@ -254,51 +287,27 @@ export function registerTools(server: McpServer) {
 
   server.tool(
     "update_request",
-    "Update an HTTP request. Omit description to keep existing docs; pass description (including \"\") to set/clear. " +
+    "Update an HTTP request. PATCH: only fields you pass change; omitted fields keep their saved values " +
+      "(pass \"[]\" / \"\" to clear one). Changes apply to the next run_request immediately. " +
       DOC_FIELD_GUIDE,
     {
       requestId: z.string().min(1),
-      collectionId: z.string().min(1),
-      name: z.string().min(1).max(200),
+      collectionId: z.string().min(1).optional(),
+      name: z.string().min(1).max(200).optional(),
       description: descriptionParam,
-      method: z.string(),
-      url: z.string().min(1),
-      headersJson: z.string().optional(),
-      body: z.string().optional(),
-      bodyType: z.string().optional(),
-      bodyPairsJson: z.string().optional(),
-      authType: z.string().optional(),
-      authJson: z.string().optional(),
-      pathVarsJson: z.string().optional(),
+      method: z.string().optional(),
+      url: z.string().min(1).optional(),
+      ...requestFields,
     },
-    async (args) => {
-      // Preserve docs when the agent omits description (omit ≠ clear).
-      let description = args.description;
-      if (description === undefined) {
-        const existing = await bridge<RequestRow>(
-          "GET",
-          `/v1/requests/${args.requestId}`,
-        );
-        description = existing.description ?? "";
-      }
-      const row: RequestRow = {
-        id: args.requestId,
-        collectionId: args.collectionId,
-        name: args.name,
-        description,
-        method: args.method,
-        url: args.url,
-        headersJson: args.headersJson ?? "[]",
-        body: args.body ?? "",
-        bodyType: args.bodyType ?? (args.body ? "json" : "none"),
-        bodyPairsJson: args.bodyPairsJson ?? "[]",
-        authType: args.authType ?? "none",
-        authJson: args.authJson ?? "{}",
-        pathVarsJson: args.pathVarsJson ?? "[]",
-      };
-      return toolText(
-        await bridge("PUT", `/v1/requests/${args.requestId}`, row),
+    async ({ requestId, ...args }) => {
+      const existing = await bridge<RequestRow>("GET", `/v1/requests/${requestId}`);
+      const patch = Object.fromEntries(
+        Object.entries(args).filter(([, v]) => v !== undefined),
       );
+      const row: RequestRow = { ...existing, ...patch, id: requestId };
+      // A body sent to a bodyless request would otherwise be silently ignored.
+      if (args.body && !args.bodyType && existing.bodyType === "none") row.bodyType = "json";
+      return toolText(await bridge("PUT", `/v1/requests/${requestId}`, row));
     },
   );
 
@@ -382,6 +391,14 @@ export function registerTools(server: McpServer) {
         await bridge("PUT", `/v1/environments/${args.environmentId}`, env),
       );
     },
+  );
+
+  server.tool(
+    "delete_environment",
+    "Delete an environment. The workspace's Global environment cannot be deleted. If the deleted env was active, the first remaining non-global env (by name) becomes active.",
+    { environmentId: z.string().min(1).describe("Id from list_environments") },
+    async ({ environmentId }) =>
+      toolText(await bridge("DELETE", `/v1/environments/${environmentId}`)),
   );
 
   server.tool(

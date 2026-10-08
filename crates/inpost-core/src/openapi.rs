@@ -304,8 +304,8 @@ pub fn export_openapi(
             op.insert("tags".into(), json!([tag]));
         }
 
-        if let Ok(headers) = serde_json::from_str::<Vec<(String, String)>>(&req.headers_json) {
-            let params: Vec<Value> = headers
+        {
+            let params: Vec<Value> = crate::httputil::parse_kv_pairs(&req.headers_json)
                 .into_iter()
                 .filter(|(k, _)| !k.is_empty())
                 .map(|(k, v)| {

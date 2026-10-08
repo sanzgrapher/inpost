@@ -460,7 +460,10 @@ function computeTreeVisibility(
 
 function parsePairs(json: string): Pair[] {
   try {
-    const arr = JSON.parse(json || "[]") as unknown;
+    let arr = JSON.parse(json || "[]") as unknown;
+    if (arr && typeof arr === "object" && !Array.isArray(arr)) {
+      arr = Object.entries(arr).map(([k, v]) => [k, typeof v === "string" ? v : JSON.stringify(v)]);
+    }
     if (!Array.isArray(arr)) return [{ key: "", value: "", enabled: true }];
     const pairs = arr.map((item): Pair => {
       if (Array.isArray(item)) {

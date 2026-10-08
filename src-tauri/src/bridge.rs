@@ -456,6 +456,13 @@ fn handle(
                 Err(e) => json_err(400, e),
             }
         }
+        (&Method::Delete, p) if p.starts_with("/v1/environments/") => {
+            let id = p.trim_start_matches("/v1/environments/");
+            match db.delete_environment(id) {
+                Ok(()) => json_ok(json!({ "ok": true })),
+                Err(e) => json_err(400, e),
+            }
+        }
         (&Method::Post, p) if p.starts_with("/v1/environments/") && p.ends_with("/activate") => {
             let id = p
                 .trim_start_matches("/v1/environments/")
@@ -563,11 +570,9 @@ fn run_request(
             active = map;
         }
     }
-    let headers: Vec<(String, String)> =
-        serde_json::from_str(&req.headers_json).unwrap_or_default();
+    let headers = inpost_core::httputil::parse_kv_pairs(&req.headers_json);
     let body_pairs = inpost_core::httputil::parse_kv_pairs(&req.body_pairs_json);
-    let path_vars: Vec<(String, String)> =
-        serde_json::from_str(&req.path_vars_json).unwrap_or_default();
+    let path_vars = inpost_core::httputil::parse_kv_pairs(&req.path_vars_json);
     let result = http_exec::send(SendRequestInput {
         method: req.method.clone(),
         url: req.url.clone(),

@@ -21183,6 +21183,23 @@ var DOC_FIELD_GUIDE = [
 var descriptionParam = external_exports.string().optional().describe(
   "Markdown documentation for this request (OpenAPI operation.description). " + DOC_FIELD_GUIDE
 );
+var requestFields = {
+  headersJson: external_exports.string().optional().describe(
+    'JSON string. Preferred: [["Accept","application/json"],["X-Id","{{id}}"]]. Also accepted: {"Accept":"application/json"} or [{"key":"Accept","value":"\u2026","enabled":true}]. Values support {{envVar}}. Content-Type: application/json is added automatically for bodyType json when not set.'
+  ),
+  body: external_exports.string().optional().describe("Raw body for bodyType json/text (supports {{envVar}})."),
+  bodyType: external_exports.enum(["none", "json", "text", "urlencoded", "multipart"]).optional().describe(
+    "Defaults to json when body is given, else none. urlencoded/multipart read bodyPairsJson and set Content-Type themselves."
+  ),
+  bodyPairsJson: external_exports.string().optional().describe(
+    'Form fields for urlencoded/multipart: [{"key":"name","value":"Ada","type":"text","enabled":true}] or [["name","Ada"]]. Multipart type "file" is NOT uploaded yet: the value is sent as plain text.'
+  ),
+  authType: external_exports.enum(["none", "bearer", "basic", "apikey"]).optional().describe("Defaults to none."),
+  authJson: external_exports.string().optional().describe(
+    'bearer: {"token":"\u2026"} \xB7 basic: {"username":"\u2026","password":"\u2026"} \xB7 apikey: {"key":"X-Api-Key","value":"\u2026","in":"header"|"query"}. Supports {{envVar}}.'
+  ),
+  pathVarsJson: external_exports.string().optional().describe('Values for :id / {id} URL placeholders: [["id","42"]].')
+};
 var collectionDescriptionParam = external_exports.string().describe(
   "Markdown documentation for this collection (OpenAPI info.description). " + DOC_FIELD_GUIDE
 );
@@ -21322,13 +21339,7 @@ function registerTools(server2) {
       description: descriptionParam,
       method: external_exports.string().default("GET"),
       url: external_exports.string().min(1),
-      headersJson: external_exports.string().optional(),
-      body: external_exports.string().optional(),
-      bodyType: external_exports.string().optional(),
-      bodyPairsJson: external_exports.string().optional(),
-      authType: external_exports.string().optional(),
-      authJson: external_exports.string().optional(),
-      pathVarsJson: external_exports.string().optional(),
+      ...requestFields,
       folderId: external_exports.string().optional()
     },
     async (args) => {
@@ -21353,49 +21364,24 @@ function registerTools(server2) {
   );
   server2.tool(
     "update_request",
-    'Update an HTTP request. Omit description to keep existing docs; pass description (including "") to set/clear. ' + DOC_FIELD_GUIDE,
+    'Update an HTTP request. PATCH: only fields you pass change; omitted fields keep their saved values (pass "[]" / "" to clear one). Changes apply to the next run_request immediately. ' + DOC_FIELD_GUIDE,
     {
       requestId: external_exports.string().min(1),
-      collectionId: external_exports.string().min(1),
-      name: external_exports.string().min(1).max(200),
+      collectionId: external_exports.string().min(1).optional(),
+      name: external_exports.string().min(1).max(200).optional(),
       description: descriptionParam,
-      method: external_exports.string(),
-      url: external_exports.string().min(1),
-      headersJson: external_exports.string().optional(),
-      body: external_exports.string().optional(),
-      bodyType: external_exports.string().optional(),
-      bodyPairsJson: external_exports.string().optional(),
-      authType: external_exports.string().optional(),
-      authJson: external_exports.string().optional(),
-      pathVarsJson: external_exports.string().optional()
+      method: external_exports.string().optional(),
+      url: external_exports.string().min(1).optional(),
+      ...requestFields
     },
-    async (args) => {
-      let description = args.description;
-      if (description === void 0) {
-        const existing = await bridge(
-          "GET",
-          `/v1/requests/${args.requestId}`
-        );
-        description = existing.description ?? "";
-      }
-      const row = {
-        id: args.requestId,
-        collectionId: args.collectionId,
-        name: args.name,
-        description,
-        method: args.method,
-        url: args.url,
-        headersJson: args.headersJson ?? "[]",
-        body: args.body ?? "",
-        bodyType: args.bodyType ?? (args.body ? "json" : "none"),
-        bodyPairsJson: args.bodyPairsJson ?? "[]",
-        authType: args.authType ?? "none",
-        authJson: args.authJson ?? "{}",
-        pathVarsJson: args.pathVarsJson ?? "[]"
-      };
-      return toolText(
-        await bridge("PUT", `/v1/requests/${args.requestId}`, row)
+    async ({ requestId, ...args }) => {
+      const existing = await bridge("GET", `/v1/requests/${requestId}`);
+      const patch = Object.fromEntries(
+        Object.entries(args).filter(([, v]) => v !== void 0)
       );
+      const row = { ...existing, ...patch, id: requestId };
+      if (args.body && !args.bodyType && existing.bodyType === "none") row.bodyType = "json";
+      return toolText(await bridge("PUT", `/v1/requests/${requestId}`, row));
     }
   );
   server2.tool(
@@ -21471,6 +21457,12 @@ function registerTools(server2) {
         await bridge("PUT", `/v1/environments/${args.environmentId}`, env)
       );
     }
+  );
+  server2.tool(
+    "delete_environment",
+    "Delete an environment. The workspace's Global environment cannot be deleted. If the deleted env was active, the first remaining non-global env (by name) becomes active.",
+    { environmentId: external_exports.string().min(1).describe("Id from list_environments") },
+    async ({ environmentId }) => toolText(await bridge("DELETE", `/v1/environments/${environmentId}`))
   );
   server2.tool(
     "set_active_environment",
