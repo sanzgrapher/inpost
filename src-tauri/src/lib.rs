@@ -349,6 +349,33 @@ fn reveal_path_fallback(path: &std::path::Path) -> Result<(), String> {
     }
 }
 
+/// WebKitGTK doesn't restart a crashed web process; the window just stays blank
+/// (#4). Reload it, but give up after 3 crashes in a minute so a crash on load
+/// can't loop forever.
+#[cfg(target_os = "linux")]
+fn reload_on_webkit_crash(window: &tauri::WebviewWindow) {
+    let _ = window.with_webview(|wv| {
+        use std::cell::RefCell;
+        use std::time::{Duration, Instant};
+        use webkit2gtk::{WebProcessTerminationReason, WebViewExt};
+        let recent = RefCell::new(Vec::<Instant>::new());
+        wv.inner().connect_web_process_terminated(move |view, reason| {
+            if reason == WebProcessTerminationReason::TerminatedByApi {
+                return;
+            }
+            let mut r = recent.borrow_mut();
+            r.retain(|t| t.elapsed() < Duration::from_secs(60));
+            if r.len() >= 3 {
+                eprintln!("Inpost: WebKit web process keeps crashing ({reason:?}); not reloading again");
+                return;
+            }
+            r.push(Instant::now());
+            eprintln!("Inpost: WebKit web process terminated ({reason:?}); reloading");
+            view.reload();
+        });
+    });
+}
+
 #[cfg(target_os = "linux")]
 fn is_wsl() -> bool {
     std::fs::read_to_string("/proc/version")
@@ -467,6 +494,10 @@ pub fn run() {
 
             app.manage(db);
             app.manage(bridge);
+            #[cfg(target_os = "linux")]
+            for w in app.webview_windows().values() {
+                reload_on_webkit_crash(w);
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

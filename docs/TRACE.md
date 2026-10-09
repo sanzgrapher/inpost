@@ -2,7 +2,7 @@
 
 **Purpose:** Living log so any new chat stays on track. Agents **read this first**, then **append** after each user request they work on.
 
-**Last updated:** 2026-10-08 (#3 headers fix + live header matrix fixes, UI check pending)
+**Last updated:** 2026-10-09 (#4 AppImage libwayland-client fix in CI + WebKit crash reload)
 
 ---
 
@@ -41,7 +41,8 @@
 - [x] Notify-only update check (Option A): toast + Settings → Check / Download → GitHub Releases
 - [ ] Scripts / Tests / Debug tabs, OAuth/JWT, cookies, Timeline, GraphQL, binary body (deferred)
 - [x] [#2](https://github.com/sanzgrapher/inpost/issues/2) MCP `delete_environment` (shipped `d7376c5`, closed)
-- [ ] [#3](https://github.com/sanzgrapher/inpost/issues/3) headers (commit object fix, keep disabled, normalize MCP writes, UI refresh) · [#4](https://github.com/sanzgrapher/inpost/issues/4) AppImage WebKit SIGABRT
+- [x] [#3](https://github.com/sanzgrapher/inpost/issues/3) headers (shipped `a293a3a`, closed)
+- [ ] [#4](https://github.com/sanzgrapher/inpost/issues/4) AppImage WebKit SIGABRT — fix in CI (strip libwayland-client) + crash reload; needs a release + reporter confirmation
 - [ ] Auth inherit-from-folder; multipart file bytes on the wire (UI Text/File done) — [#1](https://github.com/sanzgrapher/inpost/issues/1)
 - [ ] Docs polish: image upload/paste, per-folder descriptions, "View complete documentation" collection page listing all requests (Postman-style)
 
@@ -70,6 +71,26 @@
 ---
 
 ## Trace log (newest first)
+
+### 2026-10-09 — #4 fix: strip bundled libwayland-client from AppImage in CI
+**User asked:** Option a (CI post-process), but make sure it's standard and keeps working on every distro that works today.
+**Did:** `scripts/appimage-unbundle-wayland.sh` (keeps the type2 runtime byte-for-byte, rebuilds only the squashfs with the original comp/block size, `umask 0` to keep modes) + `scripts/tauri-build-linux.sh` (tauri-action `tauriScript` on Linux: `npx tauri "$@"`, then patch every `target/**/bundle/appimage/*.AppImage`, fail if none). `release.yml`: `squashfs-tools` + Linux-only `tauriScript`; Windows/macOS unchanged. **Only `libwayland-client` is removed** — first try removed all 4 `libwayland-*`, but `libwebkit2gtk` links `libwayland-server`, absent on stock Fedora / Ubuntu 24.04 → load failure; client-only = exactly the LD_PRELOAD fix + AppImage excludelist. Docker matrix (WSLg display), released v0.1.1 vs patched: Arch (Mesa 26.2) + Fedora (Mesa 26.2) original = EGL abort, patched = runs; Ubuntu 22.04 / 24.04 / Debian 12 both run (no regression). Fresh local build via wrapper also runs on Arch/Fedora. squashfs-tools 4.5 (CI's 22.04) verified. Crash-reload (`reload_on_webkit_crash`) ships with it.
+**Needs next:** Tag a release (v0.1.2) so CI produces the patched AppImage; reporter confirms on Omarchy, then close #4. Drop the scripts when tauri ships `bundle.linux.appimage.excludeLibraries` (tauri#15662).
+
+### 2026-10-09 — #4 root cause: bundled libwayland-client
+**User asked:** A commenter's fix worked on the crashing machine — what is it, why does it work?
+**Did:** Comment (xentixar): `LD_PRELOAD=/usr/lib/libwayland-client.so`. Extracted released `Inpost_0.1.1_amd64.AppImage`: bundles `libwayland-{client,cursor,egl,server}` (Ubuntu 22.04 build host, pre-1.23 ABI — same 75 exports as 1.22) + `libepoxy`, but NOT libEGL/libGL/Mesa (host). AppRun puts `$APPDIR/usr/lib` first (LD_LIBRARY_PATH + RUNPATH `$ORIGIN/../lib`), so Arch's Mesa 25 libEGL binds the stale libwayland → `eglGetDisplay` fails (`EGL_BAD_PARAMETER`) → WebKitWebProcess "Could not create default EGL display… Aborting" (SIGABRT). Known upstream: tauri-apps/tauri#15665; AppImage community excludelist already drops libwayland-client (pkg2appimage#559 / mesa#11316); tauri-cli 2.11.4/2.12.1 has no `excludeLibraries` (PR #15662 open). WEBKIT_DISABLE_* / GDK_BACKEND=x11 don't help (EGL init happens first) — the hook already sets GDK_BACKEND=x11.
+**Needs next:** Proposed fix: CI post-process AppImage (extract → delete `usr/lib/libwayland-*.so*` → repack with appimagetool), `.deb`/`.rpm` unaffected. Awaiting user go-ahead.
+
+### 2026-10-09 — #4 Linux WebKit crash: validated + crash recovery
+**User asked:** Validate/verify #4 (AppImage WebKitWebProcess SIGABRT on Omarchy/Arch/Hyprland) carefully, without breaking working users.
+**Did:** Findings: AppImage is built on `ubuntu-22.04` so it bundles Ubuntu's WebKitGTK/JSC, while libc + GPU stack come from the Arch host (backtrace: `/usr/lib/libc.so.6` + `/tmp/.mount_…/libwebkit2gtk`) — mixed-library runtime, plausible device-specific trigger; exact assertion unknowable (no symbols, single unreproduced report). Reproduced the *symptom* locally: `kill -ABRT` on WebKitWebProcess → UI process + MCP bridge survive but window stays blank forever (wry doesn't handle `web-process-terminated`). Fix (Linux-only, inert until a crash): `lib.rs::reload_on_webkit_crash` hooks `connect_web_process_terminated`, reloads on Crashed/ExceededMemoryLimit (not TerminatedByApi), gives up after 3 crashes/60s. `webkit2gtk = "2.0"` as Linux target dep (same 2.0.2 already in tree via tauri). Verified: crash → "reloading" + new web process, tabs restore from localStorage; 4th crash in a minute → "not reloading again". Did NOT set WEBKIT_DISABLE_* env vars globally or move CI to ubuntu-24.04 (would degrade/raise glibc floor for working users).
+**Needs next:** Commit/push + comment on #4 (ask reporter for repro steps / `coredumpctl` with screen + env-var workaround if it recurs).
+
+### 2026-10-09 — #3 shipped
+**User asked:** If the header issue is complete, check and merge.
+**Did:** Re-checked #3 requirements (normalize/reject on write, persist disabled, back-compat read, unreadable warning, MCP→UI refresh) — all met; `npm run check` + `cargo test` green. Committed `a293a3a` on main (excluding `release-notes-v0.1.1.md`), pushed, #3 auto-closed + summary comment.
+**Needs next:** #4 (Linux AppImage WebKit crash). Temp ws "MCP bug check (temp)" can be deleted from the UI.
 
 ### 2026-10-08 — Headers vs Yaak + inline header-name validation
 **User asked:** Is header work complete vs Yaak (mountain-loop/yaak)? Picked only "validate header names as you type".
