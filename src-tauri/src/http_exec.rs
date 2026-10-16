@@ -48,6 +48,9 @@ pub struct SendRequestResult {
     pub headers: Vec<(String, String)>,
     pub body: String,
     pub body_pretty: Option<String>,
+    /// Bytes on the wire (body may be base64, see `is_base64_body`).
+    #[serde(default)]
+    pub size_bytes: u64,
     pub elapsed_ms: u64,
     pub resolved_url: String,
     #[serde(default)]
@@ -173,7 +176,22 @@ pub fn send(input: SendRequestInput) -> Result<SendRequestResult, String> {
             )
         })
         .collect();
-    let body = response.text().map_err(|e| e.to_string())?;
+    // Images travel (IPC, history, MCP) as base64 since text() would mangle them;
+    // readers tell from Content-Type, see `is_base64_body`.
+    let ct = headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+        .map(|(_, v)| v.as_str())
+        .unwrap_or("");
+    let (body, size_bytes) = if is_base64_body(ct) {
+        use base64::Engine;
+        let bytes = response.bytes().map_err(|e| e.to_string())?;
+        (base64::engine::general_purpose::STANDARD.encode(&bytes), bytes.len() as u64)
+    } else {
+        let text = response.text().map_err(|e| e.to_string())?;
+        let n = text.len() as u64;
+        (text, n)
+    };
     let body_pretty = serde_json::from_str::<serde_json::Value>(&body)
         .ok()
         .and_then(|v| serde_json::to_string_pretty(&v).ok());
@@ -184,10 +202,17 @@ pub fn send(input: SendRequestInput) -> Result<SendRequestResult, String> {
         headers,
         body,
         body_pretty,
+        size_bytes,
         elapsed_ms,
         resolved_url: url,
         sent_headers,
     })
+}
+
+/// Raster images (SVG is text). Mirrored by `isBase64Body` in src/reqMeta.ts.
+fn is_base64_body(content_type: &str) -> bool {
+    let ct = content_type.trim().to_ascii_lowercase();
+    ct.starts_with("image/") && !ct.starts_with("image/svg")
 }
 
 #[cfg(test)]
@@ -220,5 +245,14 @@ mod tests {
         assert!(err_for(&[("X-Inject", "a\r\nX-Evil: 1")]).contains("Invalid value for header \"X-Inject\""));
         // Valid after substitution: fails only on the closed port, not on the header.
         assert!(!err_for(&[("{{hdr}}", "v")]).contains("Invalid header"));
+    }
+
+    #[test]
+    fn only_raster_images_are_base64() {
+        assert!(is_base64_body("image/png"));
+        assert!(is_base64_body(" Image/JPEG; q=1"));
+        assert!(!is_base64_body("image/svg+xml"));
+        assert!(!is_base64_body("text/html; charset=utf-8"));
+        assert!(!is_base64_body(""));
     }
 }

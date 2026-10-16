@@ -69,6 +69,73 @@ export function substituteVars(
   });
 }
 
+type QueryPair = { key: string; value: string; enabled?: boolean };
+
+const emptyQuery = (): QueryPair => ({ key: "", value: "", enabled: true });
+
+/** Parse `?a=1&b=2` from a URL into pair rows (all enabled — URLs can't store the flag). */
+export function splitUrl(url: string): { base: string; query: QueryPair[] } {
+  const i = url.indexOf("?");
+  if (i < 0) return { base: url, query: [emptyQuery()] };
+  const base = url.slice(0, i);
+  const query = url
+    .slice(i + 1)
+    .split("&")
+    .filter(Boolean)
+    .map((part) => {
+      const eq = part.indexOf("=");
+      if (eq < 0) {
+        try {
+          return { key: decodeURIComponent(part), value: "", enabled: true };
+        } catch {
+          return { key: part, value: "", enabled: true };
+        }
+      }
+      try {
+        return {
+          key: decodeURIComponent(part.slice(0, eq)),
+          value: decodeURIComponent(part.slice(eq + 1)),
+          enabled: true,
+        };
+      } catch {
+        return {
+          key: part.slice(0, eq),
+          value: part.slice(eq + 1),
+          enabled: true,
+        };
+      }
+    });
+  return {
+    base,
+    query: query.length ? query : [emptyQuery()],
+  };
+}
+
+/** Build URL with only enabled query rows (disabled stay in the Params table, not here). */
+export function joinUrl(base: string, query: QueryPair[]): string {
+  const qs = query
+    .filter((p) => p.enabled !== false && p.key.trim())
+    .map((p) => `${encodeQueryPart(p.key)}=${encodeQueryPart(p.value)}`)
+    .join("&");
+  return qs ? `${base}?${qs}` : base;
+}
+
+/**
+ * URL-bar edit → Params table: take enabled rows from the URL, keep previously
+ * disabled rows that aren't named in the new URL (same as headers / Postman).
+ */
+export function mergeQueryFromUrl(prev: QueryPair[], fromUrl: QueryPair[]): QueryPair[] {
+  const enabled = fromUrl.filter((p) => p.key.trim());
+  const keys = new Set(enabled.map((p) => p.key));
+  const disabled = prev.filter(
+    (p) => p.enabled === false && p.key.trim() && !keys.has(p.key),
+  );
+  const merged = [...enabled, ...disabled];
+  const last = merged[merged.length - 1];
+  if (!merged.length || last.key || last.value) merged.push(emptyQuery());
+  return merged;
+}
+
 /**
  * Percent-encode a query key/value while leaving `{{var}}` tokens literal.
  * encodeURIComponent turns `{{` into `%7B%7B`, which breaks URL-bar hover
@@ -250,6 +317,29 @@ if (typeof process !== "undefined" && process.argv[1]?.includes("envVar")) {
       ),
     ) === JSON.stringify([["A", "1"], { key: "X", value: "1", enabled: true }]),
     "substitute pairs json",
+  );
+
+  const { base, query: q0 } = splitUrl("https://a.b/c?x=1&y=2");
+  console.assert(base === "https://a.b/c" && q0.length === 2 && q0[0].key === "x", "splitUrl");
+  console.assert(
+    joinUrl(base, [
+      { key: "x", value: "1", enabled: true },
+      { key: "y", value: "2", enabled: false },
+    ]) === "https://a.b/c?x=1",
+    "joinUrl skips disabled",
+  );
+  const merged = mergeQueryFromUrl(
+    [
+      { key: "x", value: "1", enabled: true },
+      { key: "dbg", value: "1", enabled: false },
+      emptyQuery(),
+    ],
+    splitUrl("https://a.b/c?x=9").query,
+  );
+  console.assert(
+    merged.some((p) => p.key === "x" && p.value === "9" && p.enabled !== false) &&
+      merged.some((p) => p.key === "dbg" && p.enabled === false),
+    "merge keeps disabled across URL edit",
   );
 
   console.log("envVar self-check ok");

@@ -21198,7 +21198,10 @@ var requestFields = {
   authJson: external_exports.string().optional().describe(
     'bearer: {"token":"\u2026"} \xB7 basic: {"username":"\u2026","password":"\u2026"} \xB7 apikey: {"key":"X-Api-Key","value":"\u2026","in":"header"|"query"}. Supports {{envVar}}.'
   ),
-  pathVarsJson: external_exports.string().optional().describe('Values for :id / {id} URL placeholders: [{"key":"id","value":"42"}].')
+  pathVarsJson: external_exports.string().optional().describe('Values for :id / {id} URL placeholders: [{"key":"id","value":"42"}].'),
+  queryJson: external_exports.string().optional().describe(
+    'Query params: [{"key":"limit","value":"20","enabled":true},{"key":"debug","value":"1","enabled":false}] (same formats and enabled:false rule as headersJson). enabled:false rows stay in the Params table but are omitted from the URL / send. When omitted on create, params are taken from the URL query string.'
+  )
 };
 var collectionDescriptionParam = external_exports.string().describe(
   "Markdown documentation for this collection (OpenAPI info.description). " + DOC_FIELD_GUIDE
@@ -21357,7 +21360,8 @@ function registerTools(server2) {
         bodyPairsJson: args.bodyPairsJson ?? "[]",
         authType: args.authType ?? "none",
         authJson: args.authJson ?? "{}",
-        pathVarsJson: args.pathVarsJson ?? "[]"
+        pathVarsJson: args.pathVarsJson ?? "[]",
+        queryJson: args.queryJson ?? "[]"
       };
       return toolText(await bridge("POST", "/v1/requests", row));
     }
@@ -21481,7 +21485,8 @@ function registerTools(server2) {
       "Omit environmentId to use whatever is currently active.",
       "Compare Local vs Prod: call run_request twice with the same requestId and different environmentIds",
       "(from list_environments); compare status, resolvedUrl, and body in the two results.",
-      "Both runs appear in History."
+      "Both runs appear in History.",
+      "Raster image responses (Content-Type image/*, not SVG) return body base64-encoded; sizeBytes is the real byte count."
     ].join(" "),
     {
       requestId: external_exports.string().min(1).describe("Id from list_requests / get_request"),

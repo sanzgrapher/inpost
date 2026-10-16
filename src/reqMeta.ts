@@ -180,6 +180,40 @@ export function parseHistoryHeaders(
   }
 }
 
+export type BodyView = "pretty" | "raw" | "preview";
+export type PreviewKind = "html" | "svg" | "image";
+
+export function responseContentType(headers: [string, string][]): string {
+  const hit = headers.find(([k]) => k.toLowerCase() === "content-type");
+  return (hit?.[1] ?? "").split(";")[0].trim().toLowerCase();
+}
+
+/** Raster images arrive base64-encoded (mirrors `is_base64_body` in http_exec.rs). */
+export function isBase64Body(contentType: string): boolean {
+  return contentType.startsWith("image/") && !contentType.startsWith("image/svg");
+}
+
+export function previewKind(contentType: string): PreviewKind | null {
+  if (contentType === "text/html" || contentType === "application/xhtml+xml") return "html";
+  if (contentType.startsWith("image/svg")) return "svg";
+  if (isBase64Body(contentType)) return "image";
+  return null;
+}
+
+/** Images open in Preview (their raw text is useless); HTML opens as source. */
+export function defaultBodyView(bodyPretty: string | null | undefined, kind: PreviewKind | null): BodyView {
+  if (kind === "image" || kind === "svg") return "preview";
+  return bodyPretty ? "pretty" : "raw";
+}
+
+/** Relative links/images in a previewed page resolve against the request URL. */
+export function htmlWithBase(html: string, url: string): string {
+  if (!/^https?:\/\//i.test(url)) return html;
+  const base = `<base href="${url.replace(/&/g, "&amp;").replace(/"/g, "&quot;")}">`;
+  const head = /<head(\s[^>]*)?>/i;
+  return head.test(html) ? html.replace(head, (m) => m + base) : base + html;
+}
+
 // Runnable self-check: `npx tsx src/reqMeta.ts`
 declare const process: { argv: string[] } | undefined;
 if (typeof process !== "undefined" && process.argv[1]?.includes("reqMeta")) {
@@ -227,5 +261,19 @@ if (typeof process !== "undefined" && process.argv[1]?.includes("reqMeta")) {
   console.assert(tx.some((h) => h.key === "User-Agent"), "default User-Agent");
   console.assert(!headerNameError("X-Api_Key.v2") && !headerNameError("") && !headerNameError("{{hdr}}"));
   console.assert(!!headerNameError("X Bad") && !!headerNameError("X:Y") && !!headerNameError("{x}"));
+  const ct = responseContentType([["Content-Type", "Text/HTML; charset=utf-8"]]);
+  console.assert(ct === "text/html" && previewKind(ct) === "html", "html preview");
+  console.assert(previewKind("image/svg+xml") === "svg" && !isBase64Body("image/svg+xml"), "svg is text");
+  console.assert(previewKind("image/png") === "image" && isBase64Body("image/png"), "png is base64");
+  console.assert(previewKind("application/json") === null && previewKind("") === null, "no preview");
+  console.assert(defaultBodyView("{}", null) === "pretty" && defaultBodyView(null, "html") === "raw");
+  console.assert(defaultBodyView(null, "image") === "preview", "images open in preview");
+  console.assert(
+    htmlWithBase("<html><HEAD lang=x><title>t</title>", 'https://a.b/c?x="1"&y') ===
+      '<html><HEAD lang=x><base href="https://a.b/c?x=&quot;1&quot;&amp;y"><title>t</title>',
+    "base injected after <head>",
+  );
+  console.assert(htmlWithBase("<header>x</header>", "https://a.b/").startsWith('<base href="https://a.b/">'), "<header> isn't <head>");
+  console.assert(htmlWithBase("<p>hi</p>", "javascript:alert(1)") === "<p>hi</p>", "non-http base ignored");
   console.log("reqMeta self-check ok");
 }

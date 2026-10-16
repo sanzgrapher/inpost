@@ -4874,6 +4874,29 @@ body.sash-dragging .sidebar {
   display: none;
 }
 
+.response-preview {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+}
+
+.response-preview iframe {
+  flex: 1;
+  border: 0;
+  background: #fff;
+}
+
+.response-preview img {
+  max-width: 100%;
+  margin: auto;
+  padding: 12px;
+}
+
+.response-preview > p {
+  margin: auto;
+}
+
 .kv-table.read-only .kv-row {
   padding: 6px 12px;
 }

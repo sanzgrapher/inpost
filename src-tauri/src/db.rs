@@ -64,6 +64,9 @@ pub struct HttpRequest {
     pub auth_json: String,
     #[serde(default = "default_empty_array")]
     pub path_vars_json: String,
+    /// Query params with enabled flags; `url` keeps enabled-only for the wire.
+    #[serde(default = "default_empty_array")]
+    pub query_json: String,
     #[serde(default)]
     pub sort_order: i64,
 }
@@ -442,6 +445,12 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     if !has_column(conn, "collections", "description")? {
         conn.execute_batch(
             "ALTER TABLE collections ADD COLUMN description TEXT NOT NULL DEFAULT '';",
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    if !has_column(conn, "requests", "query_json")? {
+        conn.execute_batch(
+            "ALTER TABLE requests ADD COLUMN query_json TEXT NOT NULL DEFAULT '[]';",
         )
         .map_err(|e| e.to_string())?;
     }
@@ -947,7 +956,7 @@ impl Db {
         let mut stmt = conn
             .prepare(
                 "SELECT id, collection_id, folder_id, name, method, url, headers_json, body, sort_order,
-                        body_type, body_pairs_json, auth_type, auth_json, path_vars_json, description
+                        body_type, body_pairs_json, auth_type, auth_json, path_vars_json, query_json, description
                  FROM requests WHERE collection_id = ?1
                  ORDER BY sort_order, name",
             )
@@ -975,7 +984,8 @@ impl Db {
             auth_type: r.get(11)?,
             auth_json: r.get(12)?,
             path_vars_json: r.get(13)?,
-            description: r.get::<_, Option<String>>(14)?.unwrap_or_default(),
+            query_json: r.get::<_, Option<String>>(14)?.unwrap_or_else(|| "[]".into()),
+            description: r.get::<_, Option<String>>(15)?.unwrap_or_default(),
         })
     }
 
@@ -987,6 +997,8 @@ impl Db {
             normalize_pairs(&req.body_pairs_json).map_err(|e| format!("bodyPairsJson: {e}"))?;
         req.path_vars_json =
             normalize_pairs(&req.path_vars_json).map_err(|e| format!("pathVarsJson: {e}"))?;
+        req.query_json =
+            normalize_pairs(&req.query_json).map_err(|e| format!("queryJson: {e}"))?;
         let conn = self.0.lock().map_err(|e| e.to_string())?;
         let existing: Option<(Option<String>, i64)> = conn
             .query_row(
@@ -1029,8 +1041,8 @@ impl Db {
 
         conn.execute(
             "INSERT INTO requests (id, collection_id, folder_id, name, method, url, headers_json, body, sort_order,
-                                  body_type, body_pairs_json, auth_type, auth_json, path_vars_json, description)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                                  body_type, body_pairs_json, auth_type, auth_json, path_vars_json, query_json, description)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
              ON CONFLICT(id) DO UPDATE SET
                collection_id=excluded.collection_id,
                name=excluded.name,
@@ -1043,6 +1055,7 @@ impl Db {
                auth_type=excluded.auth_type,
                auth_json=excluded.auth_json,
                path_vars_json=excluded.path_vars_json,
+               query_json=excluded.query_json,
                description=excluded.description",
             params![
                 req.id,
@@ -1059,6 +1072,7 @@ impl Db {
                 req.auth_type,
                 req.auth_json,
                 req.path_vars_json,
+                req.query_json,
                 req.description,
             ],
         )
@@ -1080,7 +1094,7 @@ impl Db {
         let conn = self.0.lock().map_err(|e| e.to_string())?;
         conn.query_row(
             "SELECT id, collection_id, folder_id, name, method, url, headers_json, body, sort_order,
-                    body_type, body_pairs_json, auth_type, auth_json, path_vars_json, description
+                    body_type, body_pairs_json, auth_type, auth_json, path_vars_json, query_json, description
              FROM requests WHERE id = ?1",
             params![id],
             Self::map_request,
@@ -1493,6 +1507,7 @@ mod tests {
             auth_type: "none".into(),
             auth_json: "{}".into(),
             path_vars_json: "{}".into(),
+            query_json: "[]".into(),
             sort_order: 0,
         })
         .unwrap();
@@ -1651,5 +1666,37 @@ mod tests {
         db.clear_workspace_history(&ws1).unwrap();
         assert!(db.list_workspace_history(ws1, 10).unwrap().is_empty());
         assert_eq!(db.list_workspace_history(ws2, 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn query_json_keeps_disabled_params() {
+        let db = mem_db();
+        let ws = db.list_workspaces().unwrap()[0].id.clone();
+        let col = db.create_collection("C".into(), ws).unwrap();
+        let id = Uuid::new_v4().to_string();
+        let q = r#"[{"key":"a","value":"1","enabled":true},{"key":"dbg","value":"1","enabled":false}]"#;
+        db.upsert_request(HttpRequest {
+            id: id.clone(),
+            collection_id: col.id,
+            folder_id: None,
+            name: "R".into(),
+            description: String::new(),
+            method: "GET".into(),
+            url: "https://example.com?a=1".into(),
+            headers_json: "[]".into(),
+            body: String::new(),
+            body_type: "none".into(),
+            body_pairs_json: "[]".into(),
+            auth_type: "none".into(),
+            auth_json: "{}".into(),
+            path_vars_json: "[]".into(),
+            query_json: q.into(),
+            sort_order: 0,
+        })
+        .unwrap();
+        let got = db.get_request(&id).unwrap();
+        assert!(got.query_json.contains(r#""dbg""#));
+        assert!(got.query_json.contains(r#""enabled":false"#));
+        assert_eq!(got.url, "https://example.com?a=1");
     }
 }

@@ -2,7 +2,7 @@
 
 **Purpose:** Living log so any new chat stays on track. Agents **read this first**, then **append** after each user request they work on.
 
-**Last updated:** 2026-10-09 (#4 AppImage libwayland-client fix in CI + WebKit crash reload)
+**Last updated:** 2026-10-16 (disabled query params survive save)
 
 ---
 
@@ -21,7 +21,7 @@
 | **MCP ref** | Localhost bridge + `session.json` + bundled `stdio.mjs`; Requestly MCP *packaging* (open MIT SDK) |
 | **Run** | `npm run build:mcp && npm run tauri dev` (or `npm run tauri dev` which runs build:mcp first) |
 | **Check** | `npm run check` → `cargo test -p inpost-core` + `src/searchQuery.ts` / `src/shortcuts.ts` / `src/workspaceSession.ts` / `src/envVar.ts` / `src/envSync.ts` / `src/reqMeta.ts` / `src/tabClose.ts` self-checks |
-| **Dev MCP (WSL)** | `inpost-dev-v5` in `~/.cursor/mcp.json` → dev data dir `stdio.mjs`; bump `vN` after every `mcp/src` change (see AGENTS.md). Windows prod = `inpost` in Windows config |
+| **Dev MCP (WSL)** | `inpost-dev-v7` in `~/.cursor/mcp.json` → dev data dir `stdio.mjs`; bump `vN` after every `mcp/src` change (see AGENTS.md). Windows prod = `inpost` in Windows config |
 | **MCP config** | Keep app open; point Cursor at `~/.local/share/com.inpost.desktop/mcp/stdio.mjs` (Linux) / `%APPDATA%\com.inpost.desktop\mcp\stdio.mjs` (Windows) — or copy from **Settings → MCP** |
 
 ### Key docs
@@ -71,6 +71,16 @@
 ---
 
 ## Trace log (newest first)
+
+### 2026-10-16 — Disabled query params survive save (like headers)
+**User asked:** Unchecking a Params checkbox then Save deletes the param; it should stay (unchecked) and only be omitted when building/sending the URL — same as headers.
+**Did:** Root cause: query lived only in `url` via `joinUrl`, which filters `enabled:false`, and `splitUrl` always reloads as enabled. Added `requests.query_json` (migration + `HttpRequest.queryJson`), normalized like headers on upsert. UI save writes `queryJson: pairsToJson(query)` and `url: joinUrl(enabled-only)`. Load prefers `queryJson` when it has rows, else legacy URL parse. URL-bar edits use `mergeQueryFromUrl` (keep disabled not named in the new URL). Moved `splitUrl`/`joinUrl` + new merge into `envVar.ts` with self-checks. MCP `queryJson` on create/update; `build:mcp`; dev MCP → **`inpost-dev-v7`**. Rust test `query_json_keeps_disabled_params`.
+**Needs next:** Restart `tauri dev` so the SQLite migration runs; click-check: disable a query param → Save → reopen → still there unchecked; Send omits it from the wire URL.
+
+### 2026-10-09 — Response Preview (HTML / images / SVG)
+**User asked:** Add a preview mode for responses; check how other API clients do it.
+**Did:** Researched Yaak (`WebPageViewer`: iframe srcDoc + `<base href>`, `sandbox="allow-scripts allow-forms"`; per-type viewers), Bruno (`QueryResultPreview`: html/image/pdf/audio/video via base64 data URLs), Hoppscotch (lenses; iframe srcdoc unsandboxed), Postman/Insomnia (Pretty/Raw/Preview). User chose **HTML + images + SVG, no scripts**. Rust `http_exec`: raster `image/*` (not SVG) read as bytes → base64 body (`text()` mangled them) + new `sizeBytes` (real wire size; bridge history uses it). No DB migration: readers detect base64 from stored Content-Type. New `src/ResponseBody.tsx` (JSON / Raw / Preview toolbar + viewer) replaces duplicated body UI in `App.tsx` and `HistoryDetail.tsx`; HTML in `sandbox=""` iframe with `<base href=requestUrl>`; images/SVG via `<img>` data URLs (SVG in img can't run scripts); images/SVG open in Preview by default, HTML in Raw. Helpers + asserts in `reqMeta.ts` (`responseContentType`, `isBase64Body`, `previewKind`, `defaultBodyView`, `htmlWithBase`); Rust test `only_raster_images_are_base64`. MCP `run_request` doc notes base64 image bodies; `build:mcp`; dev MCP → **`inpost-dev-v6`**. Verified via MCP: httpbin PNG → base64 PNG, sizeBytes 8090 = content-length. Test requests "Preview: PNG image / HTML page / SVG image" in "httpbin checks".
+**Needs next:** User UI click-check. Images > ~190 KB are cut by the 256 KiB history cap → history shows "Too large to keep in history" (live view fine). Later: PDF (pdf.js), audio/video, CSV if wanted.
 
 ### 2026-10-09 — #4 fix: strip bundled libwayland-client from AppImage in CI
 **User asked:** Option a (CI post-process), but make sure it's standard and keeps working on every distro that works today.

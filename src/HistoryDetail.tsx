@@ -6,6 +6,7 @@ import { substituteInPairsJson, substituteVars } from "./envVar";
 import { methodClass } from "./methodStyle";
 import { PairTable, type Pair } from "./PairTable";
 import { RequestChrome } from "./RequestChrome";
+import { ResponseBody } from "./ResponseBody";
 import {
   AUTH_TYPE_OPTIONS,
   BODY_TYPE_OPTIONS,
@@ -207,9 +208,6 @@ export function HistoryDetail({
   const [reqTab, setReqTab] = useState<ReqTab>("params");
   const [resTab, setResTab] = useState<ResTab>("body");
   const [copiedId, setCopiedId] = useState(false);
-  const [bodyView, setBodyView] = useState<"pretty" | "raw">(
-    entry.bodyPretty ? "pretty" : "raw",
-  );
   const resHeaders = useMemo(() => parseHistoryHeaders(entry.headersJson), [entry.headersJson]);
   // Recorded as sent (already resolved); re-substituting would show today's env.
   const reqHeaders = useMemo(() => toPairs(snap?.headers), [snap]);
@@ -590,40 +588,13 @@ export function HistoryDetail({
                 </div>
               )}
               {resTab === "body" && (
-                <>
-                  <div className="body-toolbar">
-                    <button
-                      type="button"
-                      className={bodyView === "pretty" ? "active" : ""}
-                      onClick={() => setBodyView("pretty")}
-                      disabled={!entry.bodyPretty}
-                    >
-                      JSON
-                    </button>
-                    <button
-                      type="button"
-                      className={bodyView === "raw" ? "active" : ""}
-                      onClick={() => setBodyView("raw")}
-                    >
-                      Raw
-                    </button>
-                  </div>
-                  <div className="editor-fill">
-                    <CodeEditor
-                      value={
-                        bodyView === "pretty" && entry.bodyPretty
-                          ? entry.bodyPretty
-                          : entry.body ?? ""
-                      }
-                      language={
-                        bodyView === "pretty" && entry.bodyPretty
-                          ? "json"
-                          : "text"
-                      }
-                      readOnly
-                    />
-                  </div>
-                </>
+                <ResponseBody
+                  key={entry.id}
+                  body={entry.body ?? ""}
+                  bodyPretty={entry.bodyPretty}
+                  headers={resHeaders}
+                  url={entry.url}
+                />
               )}
             </>
           )}

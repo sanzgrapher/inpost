@@ -17,6 +17,7 @@ type RequestRow = {
   authType?: string;
   authJson?: string;
   pathVarsJson?: string;
+  queryJson?: string;
   sortOrder?: number;
 };
 
@@ -90,6 +91,14 @@ const requestFields = {
     .string()
     .optional()
     .describe('Values for :id / {id} URL placeholders: [{"key":"id","value":"42"}].'),
+  queryJson: z
+    .string()
+    .optional()
+    .describe(
+      'Query params: [{"key":"limit","value":"20","enabled":true},{"key":"debug","value":"1","enabled":false}] ' +
+        "(same formats and enabled:false rule as headersJson). enabled:false rows stay in the Params table but are omitted from the URL / send. " +
+        "When omitted on create, params are taken from the URL query string.",
+    ),
 };
 
 const collectionDescriptionParam = z
@@ -282,6 +291,7 @@ export function registerTools(server: McpServer) {
         authType: args.authType ?? "none",
         authJson: args.authJson ?? "{}",
         pathVarsJson: args.pathVarsJson ?? "[]",
+        queryJson: args.queryJson ?? "[]",
       };
       return toolText(await bridge("POST", "/v1/requests", row));
     },
@@ -423,6 +433,7 @@ export function registerTools(server: McpServer) {
       "Compare Local vs Prod: call run_request twice with the same requestId and different environmentIds",
       "(from list_environments); compare status, resolvedUrl, and body in the two results.",
       "Both runs appear in History.",
+      "Raster image responses (Content-Type image/*, not SVG) return body base64-encoded; sizeBytes is the real byte count.",
     ].join(" "),
     {
       requestId: z.string().min(1).describe("Id from list_requests / get_request"),

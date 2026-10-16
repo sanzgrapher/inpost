@@ -46,6 +46,7 @@ import {
   type LatestRelease,
 } from "./appUpdate";
 import { CodeEditor } from "./CodeEditor";
+import { ResponseBody } from "./ResponseBody";
 import { DocArticle } from "./Docs";
 import { GlobalSearch } from "./GlobalSearch";
 import { HistoryDetail } from "./HistoryDetail";
@@ -75,7 +76,15 @@ import {
   syncSelectedVars,
   uniqueEnvName,
 } from "./envSync";
-import { encodeQueryPart, pairsToMap, resolveRequestUrl, substituteInPairsJson, substituteVars } from "./envVar";
+import {
+  joinUrl,
+  mergeQueryFromUrl,
+  pairsToMap,
+  resolveRequestUrl,
+  splitUrl,
+  substituteInPairsJson,
+  substituteVars,
+} from "./envVar";
 import { diffTokens } from "./envSync";
 import {
   AUTH_TYPE_OPTIONS,
@@ -160,6 +169,8 @@ type HttpRequest = {
   authType?: string;
   authJson?: string;
   pathVarsJson?: string;
+  /** Query params with enabled flags; url holds enabled-only for the wire. */
+  queryJson?: string;
   sortOrder?: number;
 };
 type SavedSnap = {
@@ -174,6 +185,7 @@ type SavedSnap = {
   authType: string;
   authJson: string;
   pathVarsJson: string;
+  queryJson: string;
 };
 type TreeKind = "folder" | "request";
 type TreeSibling = { kind: TreeKind; id: string; name: string; sortOrder: number };
@@ -191,6 +203,8 @@ type SendResult = {
   headers: [string, string][];
   body: string;
   bodyPretty: string | null;
+  /** Bytes on the wire; image bodies are base64 (see reqMeta `isBase64Body`). */
+  sizeBytes?: number;
   elapsedMs: number;
   resolvedUrl: string;
   /** Request headers as sent (auth, body Content-Type, Accept default included). */
@@ -569,6 +583,7 @@ function normalizeRequest(r: HttpRequest): HttpRequest {
     authType: r.authType ?? "none",
     authJson: r.authJson ?? "{}",
     pathVarsJson: r.pathVarsJson ?? "[]",
+    queryJson: r.queryJson ?? "[]",
   };
 }
 
@@ -597,10 +612,13 @@ function snapFromRequest(r: HttpRequest): {
   const n = normalizeRequest(r);
   const headers = parsePairs(n.headersJson);
   const bodyPairs = parsePairs(n.bodyPairsJson!);
-  const { base, query } = splitUrl(n.url);
+  const { base, query: fromUrl } = splitUrl(n.url);
+  const stored = parsePairs(n.queryJson!);
+  // queryJson is source of truth when it has rows (keeps disabled); else legacy URL parse.
+  const query = stored.some((p) => p.key.trim()) ? stored : fromUrl;
   const pathPairs = mergePathPairs(base, parsePairs(n.pathVarsJson!));
   const url = joinUrl(base, query);
-  const draft = { ...n, url };
+  const draft = { ...n, url, queryJson: pairsToJson(query) };
   return {
     snap: {
       name: draft.name,
@@ -614,6 +632,7 @@ function snapFromRequest(r: HttpRequest): {
       authType: draft.authType!,
       authJson: draft.authJson!,
       pathVarsJson: pairsToJson(pathPairs),
+      queryJson: pairsToJson(query),
     },
     draft,
     headers,
@@ -640,44 +659,9 @@ function snapDirty(
     cur.bodyPairsJson !== saved.bodyPairsJson ||
     cur.authType !== saved.authType ||
     cur.authJson !== saved.authJson ||
-    cur.pathVarsJson !== saved.pathVarsJson
+    cur.pathVarsJson !== saved.pathVarsJson ||
+    cur.queryJson !== saved.queryJson
   );
-}
-
-function splitUrl(url: string): { base: string; query: Pair[] } {
-  const i = url.indexOf("?");
-  if (i < 0) return { base: url, query: [{ key: "", value: "", enabled: true }] };
-  const base = url.slice(0, i);
-  const query = url
-    .slice(i + 1)
-    .split("&")
-    .filter(Boolean)
-    .map((part) => {
-      const eq = part.indexOf("=");
-      if (eq < 0)
-        return {
-          key: decodeURIComponent(part),
-          value: "",
-          enabled: true,
-        };
-      return {
-        key: decodeURIComponent(part.slice(0, eq)),
-        value: decodeURIComponent(part.slice(eq + 1)),
-        enabled: true,
-      };
-    });
-  return {
-    base,
-    query: query.length ? query : [{ key: "", value: "", enabled: true }],
-  };
-}
-
-function joinUrl(base: string, query: Pair[]): string {
-  const qs = query
-    .filter((p) => p.enabled !== false && p.key.trim())
-    .map((p) => `${encodeQueryPart(p.key)}=${encodeQueryPart(p.value)}`)
-    .join("&");
-  return qs ? `${base}?${qs}` : base;
 }
 
 function parseVars(json: string): Pair[] {
@@ -2033,7 +2017,6 @@ function App() {
   const [sending, setSending] = useState(false);
   const [reqTab, setReqTab] = useState<ReqTab>("params");
   const [resTab, setResTab] = useState<ResTab>("body");
-  const [bodyView, setBodyView] = useState<"pretty" | "raw">("pretty");
   const [envDrafts, setEnvDrafts] = useState<Record<string, Pair[]>>({});
   /** Dedicated environment editor (not under request Env tab). */
   const [envViewId, setEnvViewId] = useState<string | null>(
@@ -2416,6 +2399,7 @@ function App() {
       authType: d.authType ?? "none",
       authJson: d.authJson ?? "{}",
       pathVarsJson: pairsToJson(pp),
+      queryJson: pairsToJson(q),
     };
   }
 
@@ -3116,11 +3100,7 @@ function App() {
   function onUrlChange(next: string) {
     const { base, query: q } = splitUrl(next);
     setUrlBase(base);
-    setQuery(
-      q.length && (q[q.length - 1].key || q[q.length - 1].value)
-        ? [...q, { key: "", value: "", enabled: true }]
-        : q,
-    );
+    setQuery((prev) => mergeQueryFromUrl(prev, q));
     setPathPairs((prev) => mergePathPairs(base, prev));
   }
   const activeEnvs = envs.filter((e) => !e.isGlobal);
@@ -3422,6 +3402,7 @@ function App() {
       headersJson: pairsToJson(headers),
       bodyPairsJson: bodyPairsToJson(bodyPairs),
       pathVarsJson: pairsToJson(pathPairs),
+      queryJson: pairsToJson(query),
     };
     const saved = await invoke<HttpRequest>("upsert_request", { request });
     clearConflict(saved.id);
@@ -3624,11 +3605,11 @@ function App() {
       headers: parseHistoryHeaders(h.headersJson),
       body: h.body ?? "",
       bodyPretty: h.bodyPretty ?? null,
+      sizeBytes: h.sizeBytes ?? undefined,
       elapsedMs: h.elapsedMs ?? 0,
       resolvedUrl: h.url,
     });
     setResTab("body");
-    setBodyView(h.bodyPretty ? "pretty" : "raw");
   }
 
   async function send() {
@@ -3665,7 +3646,6 @@ function App() {
       });
       setResult(res);
       setResTab("body");
-      setBodyView(res.bodyPretty ? "pretty" : "raw");
       await recordHistory({
         requestId: saved.id,
         method: saved.method,
@@ -3673,7 +3653,7 @@ function App() {
         status: res.status,
         statusText: res.statusText,
         elapsedMs: res.elapsedMs,
-        sizeBytes: new TextEncoder().encode(res.body).length,
+        sizeBytes: res.sizeBytes,
         body: res.body,
         bodyPretty: res.bodyPretty,
         headers: res.headers,
@@ -4659,7 +4639,7 @@ function App() {
   }, [renaming]);
 
   const responseSize = result
-    ? formatBytes(new TextEncoder().encode(result.body).length)
+    ? formatBytes(result.sizeBytes ?? new TextEncoder().encode(result.body).length)
     : null;
 
   function openTreeMenu(
@@ -6738,40 +6718,13 @@ function App() {
                   )}
 
                   {result && resTab === "body" && (
-                    <>
-                      <div className="body-toolbar">
-                        <button
-                          type="button"
-                          className={bodyView === "pretty" ? "active" : ""}
-                          onClick={() => setBodyView("pretty")}
-                          disabled={!result.bodyPretty}
-                        >
-                          JSON
-                        </button>
-                        <button
-                          type="button"
-                          className={bodyView === "raw" ? "active" : ""}
-                          onClick={() => setBodyView("raw")}
-                        >
-                          Raw
-                        </button>
-                      </div>
-                      <div className="editor-fill">
-                        <CodeEditor
-                          value={
-                            bodyView === "pretty" && result.bodyPretty
-                              ? result.bodyPretty
-                              : result.body
-                          }
-                          language={
-                            bodyView === "pretty" && result.bodyPretty
-                              ? "json"
-                              : "text"
-                          }
-                          readOnly
-                        />
-                      </div>
-                    </>
+                    <ResponseBody
+                      key={viewingHistoryId ?? "live"}
+                      body={result.body}
+                      bodyPretty={result.bodyPretty}
+                      headers={result.headers}
+                      url={result.resolvedUrl}
+                    />
                   )}
 
                   {result && resTab === "headers" && (

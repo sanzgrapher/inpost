@@ -678,7 +678,7 @@ fn run_request(
                 status: Some(r.status as i64),
                 status_text: Some(r.status_text.clone()),
                 elapsed_ms: Some(r.elapsed_ms as i64),
-                size_bytes: Some(r.body.len() as i64),
+                size_bytes: Some(r.size_bytes as i64),
                 error: None,
                 body: Some(r.body.clone()),
                 body_pretty: r.body_pretty.clone(),

@@ -1808,6 +1808,7 @@ dependencies = [
 name = "inpost"
 version = "0.1.1"
 dependencies = [
+ "base64 0.22.1",
  "dirs",
  "inpost-core",
  "reqwest 0.12.28",
