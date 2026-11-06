@@ -2,7 +2,7 @@
 
 **Purpose:** Living log so any new chat stays on track. Agents **read this first**, then **append** after each user request they work on.
 
-**Last updated:** 2026-11-07 (URL ↔ Params sync)
+**Last updated:** 2026-11-07 (PokéAPI envs restored)
 
 ---
 
@@ -72,6 +72,26 @@
 ---
 
 ## Trace log (newest first)
+
+### 2026-11-07 — Restore PokéAPI env values for testing
+**User asked:** Fix PokéAPI with env values so they can test.
+**Did:** Active env had been Chain demo’s httpbin `Local` (broke `{{baseUrl}}`). Restored Global (`accept`/`userAgent`); created **PokéAPI Prod** (active: ditto, limit 20, …) + **PokéAPI Dev** (pikachu, limit 5, …); renamed old Local → **Chain Local**; deleted Untitled junk. Smoke: List/Get Pokémon → 200 with substituted URLs.
+**Needs next:** In UI switch to PokéAPI workspace → Prod → Send List/Get Pokémon; Ctrl+F on the big JSON response.
+
+### 2026-11-07 — Find toggles as Aa / ab / .* icons
+**User asked:** Match case / regex / whole word like Cursor/VS Code icon toggles with hover tooltips (not checkbox labels).
+**Did:** Custom CM `createPanel` in `CodeEditor.tsx` — find field with `Aa` / `ab` / `.*` toggles (`title` tooltips), chevron next/prev, close. CSS for in-field toggles + active state.
+**Needs next:** Reopen Ctrl+F — hover toggles for “Match Case” / “Match Whole Word” / “Use Regular Expression”.
+
+### 2026-11-07 — Find next/prev as icons
+**User asked:** Next/prev in the find bar should be icons, not text buttons.
+**Did:** CSS-only on `.cm-button[name=next|prev]` — icon-btn sizing, chevron up/down masks (lucide paths), label text visually hidden but kept for a11y.
+**Needs next:** None for this; reopen Ctrl+F to see chevrons.
+
+### 2026-11-07 — Ctrl+F find in response / body editors
+**User asked:** Click response area + Ctrl+F should search through the response viewer. (Follow-up: didn’t work.)
+**Did:** Wired CodeMirror `@codemirror/search` in `CodeEditor.tsx` + panel CSS. Root cause of miss: read-only response CM often doesn’t keep `activeElement` inside `.cm-editor`, so the first guard no-oped. Fix: `tabindex=0` on content, remember last-clicked editor, resolve find target from response/body pane chrome (toolbar click counts), then open panel. HMR earlier also briefly broke on a bad overwrite (`lang-html`) — restored.
+**Needs next:** Click response body (or JSON/Raw toolbar) → Ctrl+F → find bar at top of that editor; Esc closes.
 
 ### 2026-11-07 — URL bar ↔ Params stay in sync
 **User asked:** Typing `?` / params in the URL bar didn’t work; Params and URL should reflect each other both ways.

@@ -3173,6 +3173,157 @@ body.sash-dragging .sidebar {
   overflow: auto !important;
 }
 
+/* CodeMirror find panel (Ctrl/Cmd+F in response / body editors) */
+.cm-panel.cm-search {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  padding: 6px 8px;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  z-index: 5;
+}
+
+.cm-panel.cm-search .cm-search-field {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  flex: 1 1 14em;
+  min-width: 12em;
+  max-width: 32em;
+  padding: 2px 4px 2px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.cm-panel.cm-search .cm-search-field:focus-within {
+  border-color: var(--accent);
+}
+
+.cm-panel.cm-search .cm-search-field .cm-textfield {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  background: transparent;
+  border: none;
+  padding: 3px 4px 3px 0;
+  outline: none;
+}
+
+.cm-panel.cm-search .cm-search-toggle {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+}
+
+.cm-panel.cm-search .cm-search-toggle:hover {
+  color: var(--text);
+  background: var(--sidebar);
+}
+
+.cm-panel.cm-search .cm-search-toggle.on {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.cm-panel.cm-search .cm-search-word {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* next / prev: icon-only (label stays in DOM for a11y, visually hidden) */
+.cm-panel.cm-search .cm-button[name="next"],
+.cm-panel.cm-search .cm-button[name="prev"] {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  font-size: 0;
+  line-height: 0;
+  color: transparent;
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+.cm-panel.cm-search .cm-button[name="next"]:hover,
+.cm-panel.cm-search .cm-button[name="prev"]:hover {
+  background: var(--bg);
+}
+
+.cm-panel.cm-search .cm-button[name="next"]::before,
+.cm-panel.cm-search .cm-button[name="prev"]::before {
+  content: "";
+  width: 14px;
+  height: 14px;
+  background-color: var(--muted);
+  -webkit-mask: center / contain no-repeat;
+  mask: center / contain no-repeat;
+}
+
+.cm-panel.cm-search .cm-button[name="next"]:hover::before,
+.cm-panel.cm-search .cm-button[name="prev"]:hover::before {
+  background-color: var(--text);
+}
+
+/* lucide ChevronDown / ChevronUp */
+.cm-panel.cm-search .cm-button[name="next"]::before {
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+}
+
+.cm-panel.cm-search .cm-button[name="prev"]::before {
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m18 15-6-6-6 6'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m18 15-6-6-6 6'/%3E%3C/svg%3E");
+}
+
+.cm-panel.cm-search button[name="close"] {
+  margin-left: auto;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 2px 6px;
+  font-size: 14px;
+  line-height: 1;
+  border-radius: 6px;
+}
+
+.cm-panel.cm-search button[name="close"]:hover {
+  color: var(--text);
+  background: var(--bg);
+}
+
+.cm-searchMatch {
+  background-color: #fde68a88;
+}
+
+.cm-searchMatch-selected {
+  background-color: #f59e0b66;
+}
+
 .kv-table {
   display: flex;
   flex-direction: column;
