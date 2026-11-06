@@ -2,7 +2,7 @@
 
 **Purpose:** Living log so any new chat stays on track. Agents **read this first**, then **append** after each user request they work on.
 
-**Last updated:** 2026-11-07 (UI Run folder + Chain demo)
+**Last updated:** 2026-11-07 (URL ↔ Params sync)
 
 ---
 
@@ -72,6 +72,11 @@
 ---
 
 ## Trace log (newest first)
+
+### 2026-11-07 — URL bar ↔ Params stay in sync
+**User asked:** Typing `?` / params in the URL bar didn’t work; Params and URL should reflect each other both ways.
+**Did:** Root cause: `composedUrl = joinUrl(…)` dropped a bare `?` (no keys yet) on every keystroke. Keep a raw `urlEdit` draft while the URL field is focused; Params edits update that draft via `joinUrl`. `joinUrl` omits `=` for empty values so `?foo` round-trips. Self-checks in `envVar.ts`.
+**Needs next:** Click-check: type `?a=1&b=2` in the URL bar → Params rows appear; edit Params → URL updates; trailing `?` stays while typing.
 
 ### 2026-11-07 — UI Run folder/collection + live Chain demo
 **User asked:** Set/use chaining; do we need separate Scripts; make UI usable for manual users.

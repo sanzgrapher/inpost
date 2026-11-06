@@ -26,6 +26,8 @@ type Props = {
   className?: string;
   /** Snapshot / history: same chrome, no edits or env hover. */
   readOnly?: boolean;
+  /** Parent keeps a raw draft while focused so `?` / incomplete query aren't stripped. */
+  onFocusChange?: (focused: boolean) => void;
   env: EnvInfo | null;
   envPairs: Pair[];
   globalPairs?: Pair[];
@@ -48,6 +50,7 @@ export function UrlField({
   placeholder,
   className = "",
   readOnly = false,
+  onFocusChange,
   env,
   envPairs,
   globalPairs = [],
@@ -263,9 +266,14 @@ export function UrlField({
           commit(e.target.value);
         }}
         onFocus={() => {
-          if (!readOnly) setFocused(true);
+          if (readOnly) return;
+          setFocused(true);
+          onFocusChange?.(true);
         }}
-        onBlur={() => setFocused(false)}
+        onBlur={() => {
+          setFocused(false);
+          onFocusChange?.(false);
+        }}
         onKeyDown={(e) => {
           if (readOnly) {
             e.preventDefault();

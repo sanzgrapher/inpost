@@ -2018,6 +2018,8 @@ function App() {
   ]);
   const [pathPairs, setPathPairs] = useState<Pair[]>([]);
   const [urlBase, setUrlBase] = useState("");
+  /** Raw URL while the bar is focused — keeps trailing `?` / incomplete query intact. */
+  const [urlEdit, setUrlEdit] = useState<string | null>(null);
   const [result, setResult] = useState<SendResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
@@ -2239,6 +2241,7 @@ function App() {
     setBodyPairs([{ key: "", value: "", enabled: true }]);
     setPathPairs([]);
     setUrlBase("");
+    setUrlEdit(null);
     setResult(null);
     setError(null);
     setTabCache({});
@@ -2376,6 +2379,7 @@ function App() {
     error: string | null;
   }) {
     setCrumbEditing(false);
+    setUrlEdit(null);
     if (cached) {
       setDraft(cached.draft);
       setHeaders(cached.headers);
@@ -3080,6 +3084,7 @@ function App() {
   }, [requests, collectionId]);
 
   const composedUrl = useMemo(() => joinUrl(urlBase, query), [urlBase, query]);
+  const urlBarValue = urlEdit ?? composedUrl;
   const headerCount = headers.filter(
     (h) => h.enabled !== false && h.key.trim(),
   ).length;
@@ -3115,10 +3120,26 @@ function App() {
   }
 
   function onUrlChange(next: string) {
+    setUrlEdit(next);
     const { base, query: q } = splitUrl(next);
     setUrlBase(base);
     setQuery((prev) => mergeQueryFromUrl(prev, q));
     setPathPairs((prev) => mergePathPairs(base, prev));
+  }
+
+  function onUrlFocusChange(focused: boolean) {
+    if (focused) {
+      setUrlEdit((cur) => cur ?? composedUrl);
+    } else {
+      setUrlEdit(null);
+    }
+  }
+
+  function onQueryChange(next: Pair[]) {
+    setQuery(next);
+    // Params → URL bar (live while typing in the table, and while URL is focused).
+    const joined = joinUrl(urlBase, next);
+    setUrlEdit((cur) => (cur !== null ? joined : cur));
   }
   const activeEnvs = envs.filter((e) => !e.isGlobal);
   const activeEnv = activeEnvs.find((e) => e.isActive);
@@ -3431,6 +3452,7 @@ function App() {
     setBodyPairs(loaded.bodyPairs);
     setPathPairs(loaded.pathPairs);
     setUrlBase(loaded.urlBase);
+    setUrlEdit(null);
     setSavedById((s) => ({ ...s, [saved.id]: loaded.snap }));
     setTabCache((c) => {
       const { [saved.id]: _, ...rest } = c;
@@ -6225,8 +6247,9 @@ function App() {
                 resolvedUrl={resolvedUrl}
                 method={draft.method}
                 onMethodChange={(method) => setDraft({ ...draft, method })}
-                url={composedUrl}
+                url={urlBarValue}
                 onUrlChange={onUrlChange}
+                onUrlFocusChange={onUrlFocusChange}
                 urlHistoryKey={selectedId ?? ""}
                 urlInputRef={urlRef}
                 env={activeEnv ?? null}
@@ -6357,7 +6380,7 @@ function App() {
                         <div className="params-block">
                           <PairTable
                             pairs={query}
-                            onChange={setQuery}
+                            onChange={onQueryChange}
                             keyLabel="Param"
                             tools
                             envHover={envHover}

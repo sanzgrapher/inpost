@@ -28,6 +28,7 @@ export function RequestChrome({
   methodDisabled = false,
   url,
   onUrlChange,
+  onUrlFocusChange,
   urlReadOnly = false,
   urlHistoryKey = "",
   urlInputRef,
@@ -49,6 +50,7 @@ export function RequestChrome({
   methodDisabled?: boolean;
   url: string;
   onUrlChange?: (url: string) => void;
+  onUrlFocusChange?: (focused: boolean) => void;
   urlReadOnly?: boolean;
   urlHistoryKey?: string;
   urlInputRef?: RefObject<HTMLInputElement | null>;
@@ -110,6 +112,7 @@ export function RequestChrome({
           className="url-input"
           value={url}
           onChange={(v) => onUrlChange?.(v)}
+          onFocusChange={onUrlFocusChange}
           historyKey={urlHistoryKey}
           placeholder="{{baseUrl}}/path"
           readOnly={urlReadOnly}

@@ -115,7 +115,12 @@ export function splitUrl(url: string): { base: string; query: QueryPair[] } {
 export function joinUrl(base: string, query: QueryPair[]): string {
   const qs = query
     .filter((p) => p.enabled !== false && p.key.trim())
-    .map((p) => `${encodeQueryPart(p.key)}=${encodeQueryPart(p.value)}`)
+    .map((p) => {
+      const k = encodeQueryPart(p.key);
+      // Omit `=` when value is empty so typing `?foo` in the URL bar round-trips
+      // (join→split→join) without forcing `?foo=` on every keystroke.
+      return p.value === "" ? k : `${k}=${encodeQueryPart(p.value)}`;
+    })
     .join("&");
   return qs ? `${base}?${qs}` : base;
 }
@@ -327,6 +332,26 @@ if (typeof process !== "undefined" && process.argv[1]?.includes("envVar")) {
       { key: "y", value: "2", enabled: false },
     ]) === "https://a.b/c?x=1",
     "joinUrl skips disabled",
+  );
+  console.assert(
+    joinUrl("https://a.b/c", [{ key: "foo", value: "", enabled: true }]) ===
+      "https://a.b/c?foo",
+    "joinUrl omits = for empty value",
+  );
+  console.assert(
+    splitUrl("https://a.b/c?foo").query[0].key === "foo" &&
+      splitUrl("https://a.b/c?foo").query[0].value === "",
+    "splitUrl key-only query",
+  );
+  console.assert(
+    joinUrl(
+      "https://a.b/c",
+      mergeQueryFromUrl(
+        [emptyQuery()],
+        splitUrl("https://a.b/c?a=1&b=2").query,
+      ),
+    ) === "https://a.b/c?a=1&b=2",
+    "URL↔Params round-trip",
   );
   const merged = mergeQueryFromUrl(
     [
