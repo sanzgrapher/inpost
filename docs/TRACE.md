@@ -2,7 +2,7 @@
 
 **Purpose:** Living log so any new chat stays on track. Agents **read this first**, then **append** after each user request they work on.
 
-**Last updated:** 2026-11-07 (PokéAPI envs restored)
+**Last updated:** 2026-11-07 (response JSONPath filter)
 
 ---
 
@@ -12,7 +12,7 @@
 | **Phase** | Phase 0 ✅ · Phase 1 MCP ✅ · Phase 2 ✅ · Local workspaces ✅ · Settings tab ✅ · Release pipeline ✅ |
 | **Next up** | Phase 3 sync-engine spike (PowerSync vs ElectricSQL) |
 | **Auto-update** | **A (notify-only)** ✅ — GitHub latest release check + toast / Settings Download. Full in-app install (B) still backlog |
-| **Release** | Cutting **v0.1.1** (short notes + collapsible changelog) |
+| **Release** | Cutting **v0.1.2** (chaining, response filter + find, URL↔Params, AppImage #4 fix) |
 | **OpenAPI MCP** | `import_openapi` / `export_openapi`: `summary` = request name; `tags` = folders (3.2 `parent` when nested) |
 | **PokéAPI ws** | Docs + env-wired requests filled via MCP (Prod active) |
 | **App** | Tauri 2 + React + SQLite · `com.inpost.desktop` · MIT |
@@ -72,6 +72,16 @@
 ---
 
 ## Trace log (newest first)
+
+### 2026-11-07 — Push + cut v0.1.2
+**User asked:** Push and start a new release.
+**Did:** `npm run check` green. Committed the response filter, bumped `0.1.1`→`0.1.2` (package/lock, tauri.conf, workspace + app Cargo.toml, Cargo.lock; package-lock had been stale at 0.1.0). Pushed `main` + annotated tag `v0.1.2` → `release.yml` matrix. Notes drafted in untracked `release-notes-v0.1.2.md`.
+**Needs next:** Confirm Actions green; apply notes (`gh release edit v0.1.2 --notes-file release-notes-v0.1.2.md`); ask #4 reporter to test the patched AppImage, then close #4. Delete old `release-notes-v0.1.1.md`.
+
+### 2026-11-07 — Response JSONPath filter (`[*]` wildcards)
+**User asked:** Filter large JSON responses to e.g. `results.name` or `game_indices[].version.name` (Insomnia/Yaak-style filter box).
+**Did:** `extract.rs` `json_path_get` now parses to segments and supports `[*]` / `.*` (fan-out → array; items missing the rest of the path skipped); tests `path_wildcards`. Extractors get wildcards too. New Tauri command `json_path_filter(body, path)` → pretty JSON. `ResponseBody.tsx`: filter input (ListFilter icon) in body toolbar for JSON responses; 150ms debounce; Esc clears; error shown under toolbar with full body kept. CSS `.body-filter`.
+**Needs next:** Not supported yet: `[?()]` filter expressions, `..` recursive descent, slices — add only if needed. MCP `run_request` has no filter param (agents can parse JSON themselves).
 
 ### 2026-11-07 — Restore PokéAPI env values for testing
 **User asked:** Fix PokéAPI with env values so they can test.

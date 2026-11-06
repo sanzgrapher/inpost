@@ -1806,7 +1806,7 @@ dependencies = [
 
 [[package]]
 name = "inpost"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "base64 0.22.1",
  "dirs",
@@ -1825,7 +1825,7 @@ dependencies = [
 
 [[package]]
 name = "inpost-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "regex",
  "serde",
