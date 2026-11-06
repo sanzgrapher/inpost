@@ -53,6 +53,7 @@ pub fn import_into_db(
             auth_json: "{}".into(),
             path_vars_json: "[]".into(),
             query_json: "[]".into(),
+            extractors_json: "[]".into(),
             sort_order: 0,
         })?;
     }

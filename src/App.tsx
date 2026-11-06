@@ -171,6 +171,8 @@ type HttpRequest = {
   pathVarsJson?: string;
   /** Query params with enabled flags; url holds enabled-only for the wire. */
   queryJson?: string;
+  /** Post-response extractors: key = env var, value = JSONPath ($.data.id). */
+  extractorsJson?: string;
   sortOrder?: number;
 };
 type SavedSnap = {
@@ -186,6 +188,7 @@ type SavedSnap = {
   authJson: string;
   pathVarsJson: string;
   queryJson: string;
+  extractorsJson: string;
 };
 type TreeKind = "folder" | "request";
 type TreeSibling = { kind: TreeKind; id: string; name: string; sortOrder: number };
@@ -227,7 +230,7 @@ type HistoryEntry = {
   requestJson?: string | null;
   createdAt: number;
 };
-type ReqTab = "overview" | "params" | "headers" | "body" | "auth";
+type ReqTab = "overview" | "params" | "headers" | "body" | "auth" | "extract";
 type ResTab = "body" | "headers" | "history";
 type SettingsAppSection = "general" | "shortcuts" | "mcp";
 type SettingsSection = SettingsAppSection | `ws:${string}`;
@@ -584,6 +587,7 @@ function normalizeRequest(r: HttpRequest): HttpRequest {
     authJson: r.authJson ?? "{}",
     pathVarsJson: r.pathVarsJson ?? "[]",
     queryJson: r.queryJson ?? "[]",
+    extractorsJson: r.extractorsJson ?? "[]",
   };
 }
 
@@ -633,6 +637,7 @@ function snapFromRequest(r: HttpRequest): {
       authJson: draft.authJson!,
       pathVarsJson: pairsToJson(pathPairs),
       queryJson: pairsToJson(query),
+      extractorsJson: pairsToJson(parsePairs(n.extractorsJson ?? "[]")),
     },
     draft,
     headers,
@@ -660,7 +665,8 @@ function snapDirty(
     cur.authType !== saved.authType ||
     cur.authJson !== saved.authJson ||
     cur.pathVarsJson !== saved.pathVarsJson ||
-    cur.queryJson !== saved.queryJson
+    cur.queryJson !== saved.queryJson ||
+    cur.extractorsJson !== saved.extractorsJson
   );
 }
 
@@ -2119,6 +2125,8 @@ function App() {
     revealError?: string;
   } | null>(null);
   const [updateToast, setUpdateToast] = useState<LatestRelease | null>(null);
+  const [runToast, setRunToast] = useState<string | null>(null);
+  const [runBusy, setRunBusy] = useState(false);
 
   // Auto-dismiss the export toast; a manual Dismiss button also clears it.
   useEffect(() => {
@@ -2126,6 +2134,12 @@ function App() {
     const t = window.setTimeout(() => setExportToast(null), 8000);
     return () => window.clearTimeout(t);
   }, [exportToast]);
+
+  useEffect(() => {
+    if (!runToast) return;
+    const t = window.setTimeout(() => setRunToast(null), 10000);
+    return () => window.clearTimeout(t);
+  }, [runToast]);
 
   // Notify-only update check once on launch (respects dismissed version).
   useEffect(() => {
@@ -2400,6 +2414,7 @@ function App() {
       authJson: d.authJson ?? "{}",
       pathVarsJson: pairsToJson(pp),
       queryJson: pairsToJson(q),
+      extractorsJson: pairsToJson(parsePairs(d.extractorsJson ?? "[]")),
     };
   }
 
@@ -2698,6 +2713,8 @@ function App() {
         headersJson: pairsToJson(h),
         bodyPairsJson: bodyPairsToJson(bp),
         pathVarsJson: pairsToJson(pp),
+        queryJson: pairsToJson(q),
+        extractorsJson: pairsToJson(parsePairs(d.extractorsJson ?? "[]")),
       };
       const saved = await invoke<HttpRequest>("upsert_request", { request });
       const loaded = snapFromRequest(saved);
@@ -3403,6 +3420,7 @@ function App() {
       bodyPairsJson: bodyPairsToJson(bodyPairs),
       pathVarsJson: pairsToJson(pathPairs),
       queryJson: pairsToJson(query),
+      extractorsJson: pairsToJson(parsePairs(draft.extractorsJson ?? "[]")),
     };
     const saved = await invoke<HttpRequest>("upsert_request", { request });
     clearConflict(saved.id);
@@ -3646,6 +3664,17 @@ function App() {
       });
       setResult(res);
       setResTab("body");
+      try {
+        const extracted = await invoke<Record<string, string>>(
+          "apply_response_extractors",
+          { requestId: saved.id, body: res.body, environmentId: null },
+        );
+        if (extracted && Object.keys(extracted).length > 0) {
+          await refreshEnvs();
+        }
+      } catch {
+        /* extractors are best-effort; don't fail the send */
+      }
       await recordHistory({
         requestId: saved.id,
         method: saved.method,
@@ -3742,6 +3771,8 @@ function App() {
       authType: "none",
       authJson: "{}",
       pathVarsJson: "[]",
+      queryJson: "[]",
+      extractorsJson: "[]",
       sortOrder: 0,
     };
     const saved = await invoke<HttpRequest>("upsert_request", { request: req });
@@ -4205,6 +4236,55 @@ function App() {
       setExportToast({ path });
     } catch (e) {
       setError(String(e));
+    }
+  }
+
+  type RunSequenceResult = {
+    steps: {
+      name: string;
+      ok: boolean;
+      status?: number | null;
+      error?: string | null;
+      extracted: Record<string, string>;
+    }[];
+    extracted: Record<string, string>;
+    stoppedEarly: boolean;
+  };
+
+  async function runTreeSequence(kind: "folder" | "collection", id: string) {
+    if (runBusy) return;
+    setRunBusy(true);
+    setError(null);
+    setRunToast(kind === "folder" ? "Running folder…" : "Running collection…");
+    try {
+      const result = await invoke<RunSequenceResult>(
+        kind === "folder" ? "run_folder" : "run_collection",
+        kind === "folder"
+          ? { folderId: id, environmentId: null }
+          : { collectionId: id, environmentId: null },
+      );
+      const ok = result.steps.filter((s) => s.ok).length;
+      const fail = result.steps.length - ok;
+      const extractedKeys = Object.keys(result.extracted);
+      const bits = [
+        `${ok}/${result.steps.length} ok`,
+        fail ? `${fail} failed` : null,
+        result.stoppedEarly ? "stopped early" : null,
+        extractedKeys.length
+          ? `extracted ${extractedKeys.join(", ")}`
+          : null,
+      ].filter(Boolean);
+      setRunToast(
+        result.steps.length === 0
+          ? "Nothing to run (empty folder)"
+          : bits.join(" · "),
+      );
+      await refreshEnvs();
+    } catch (e) {
+      setRunToast(null);
+      setError(String(e));
+    } finally {
+      setRunBusy(false);
     }
   }
 
@@ -6222,6 +6302,7 @@ function App() {
                         ["headers", `Headers${headerCount ? ` (${headerCount})` : ""}`],
                         ["body", "Body"],
                         ["auth", "Auth"],
+                        ["extract", "Extract"],
                       ] as [ReqTab, string][]
                     ).map(([id, label]) => (
                       <button
@@ -6238,6 +6319,10 @@ function App() {
                           <span className="dot" />
                         ) : null}
                         {id === "auth" && authType !== "none" ? (
+                          <span className="dot" />
+                        ) : null}
+                        {id === "extract" &&
+                        parsePairs(draft.extractorsJson ?? "[]").some((p) => p.key.trim()) ? (
                           <span className="dot" />
                         ) : null}
                       </button>
@@ -6484,6 +6569,31 @@ function App() {
                             </label>
                           </div>
                         )}
+                      </div>
+                    )}
+                    {reqTab === "extract" && (
+                      <div className="params-stack">
+                        <p className="muted" style={{ margin: "0 0 8px", fontSize: 12 }}>
+                          After Send, write response JSON into the active environment
+                          (same enable checkbox as Params / Headers — uncheck to skip,
+                          row stays). Variable ← JSONPath, e.g. bookingId ← $.data.id.
+                        </p>
+                        <div className="params-block">
+                          <div className="params-label">
+                            Variable → JSONPath
+                          </div>
+                          <PairTable
+                            pairs={parsePairs(draft.extractorsJson ?? "[]")}
+                            onChange={(pairs) =>
+                              setDraft({
+                                ...draft,
+                                extractorsJson: pairsToJson(pairs),
+                              })
+                            }
+                            keyLabel="Variable"
+                            tools
+                          />
+                        </div>
                       </div>
                     )}
                   </div>
@@ -6908,6 +7018,19 @@ function App() {
                 <button
                   type="button"
                   role="menuitem"
+                  disabled={runBusy}
+                  onClick={() => {
+                    const id = treeMenu.id;
+                    setTreeMenu(null);
+                    void runTreeSequence("collection", id);
+                  }}
+                >
+                  Run collection
+                </button>
+                <div className="explorer-menu-sep" />
+                <button
+                  type="button"
+                  role="menuitem"
                   onClick={() => {
                     const c = collections.find((x) => x.id === treeMenu.id);
                     if (c) startRename("collection", c.id, c.name);
@@ -6957,6 +7080,19 @@ function App() {
               </>
             ) : treeMenu.target === "folder" ? (
               <>
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={runBusy}
+                  onClick={() => {
+                    const id = treeMenu.id;
+                    setTreeMenu(null);
+                    void runTreeSequence("folder", id);
+                  }}
+                >
+                  Run folder
+                </button>
+                <div className="explorer-menu-sep" />
                 <button
                   type="button"
                   role="menuitem"
@@ -7538,8 +7674,30 @@ function App() {
         </Modal>
       )}
 
-      {exportToast && (
+      {runToast && (
         <div className="export-toast" role="status">
+          <div className="export-toast-text">
+            <span className="export-toast-title">
+              {runBusy ? "Running…" : "Run finished"}
+            </span>
+            <span className="export-toast-path">{runToast}</span>
+          </div>
+          <button
+            type="button"
+            className="export-toast-close"
+            aria-label="Dismiss"
+            onClick={() => setRunToast(null)}
+          >
+            <X {...Ism} />
+          </button>
+        </div>
+      )}
+
+      {exportToast && (
+        <div
+          className={`export-toast${runToast ? " export-toast-stack" : ""}`}
+          role="status"
+        >
           <FileUp {...I} aria-hidden />
           <div className="export-toast-text">
             <span className="export-toast-title">Collection exported</span>
@@ -7583,7 +7741,9 @@ function App() {
 
       {updateToast && (
         <div
-          className={`export-toast${exportToast ? " export-toast-stack" : ""}`}
+          className={`export-toast${
+            exportToast || runToast ? " export-toast-stack" : ""
+          }`}
           role="status"
         >
           <ArrowUpCircle {...I} aria-hidden />

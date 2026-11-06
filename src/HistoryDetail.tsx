@@ -1,5 +1,5 @@
 import { ArrowUpRight, Copy } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { CodeEditor } from "./CodeEditor";
 import { DocArticle } from "./Docs";
 import { substituteInPairsJson, substituteVars } from "./envVar";
@@ -63,6 +63,9 @@ type Props = {
 
 type ReqTab = "overview" | "params" | "headers" | "body" | "auth";
 type ResTab = "body" | "headers";
+
+/** HistoryDetail unmounts when you leave the tab; remember panes so Overview sticks. */
+const paneByEntry = new Map<string, { req: ReqTab; res: ResTab }>();
 
 const noop = () => {};
 const noopAsync = async () => {};
@@ -205,8 +208,15 @@ export function HistoryDetail({
   globalPairs = [],
 }: Props) {
   const snap = useMemo(() => parseSnapshot(entry.requestJson), [entry.requestJson]);
-  const [reqTab, setReqTab] = useState<ReqTab>("params");
-  const [resTab, setResTab] = useState<ResTab>("body");
+  const [reqTab, setReqTab] = useState<ReqTab>(
+    () => paneByEntry.get(entry.id)?.req ?? "params",
+  );
+  const [resTab, setResTab] = useState<ResTab>(
+    () => paneByEntry.get(entry.id)?.res ?? "body",
+  );
+  useEffect(() => {
+    paneByEntry.set(entry.id, { req: reqTab, res: resTab });
+  }, [entry.id, reqTab, resTab]);
   const [copiedId, setCopiedId] = useState(false);
   const resHeaders = useMemo(() => parseHistoryHeaders(entry.headersJson), [entry.headersJson]);
   // Recorded as sent (already resolved); re-substituting would show today's env.

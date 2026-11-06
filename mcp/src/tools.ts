@@ -18,6 +18,8 @@ type RequestRow = {
   authJson?: string;
   pathVarsJson?: string;
   queryJson?: string;
+  /** Post-response extractors: [{"key":"bookingId","value":"$.data.id","enabled":true}] */
+  extractorsJson?: string;
   sortOrder?: number;
 };
 
@@ -98,6 +100,16 @@ const requestFields = {
       'Query params: [{"key":"limit","value":"20","enabled":true},{"key":"debug","value":"1","enabled":false}] ' +
         "(same formats and enabled:false rule as headersJson). enabled:false rows stay in the Params table but are omitted from the URL / send. " +
         "When omitted on create, params are taken from the URL query string.",
+    ),
+  extractorsJson: z
+    .string()
+    .optional()
+    .describe(
+      'Post-response extractors (same row shape as headersJson / queryJson). ' +
+        'Canonical: [{"key":"bookingId","value":"$.data.id","enabled":true},{"key":"slot","value":"$.data.slot","enabled":false}]. ' +
+        "enabled:false rows stay in the Extract table (unchecked) but are not written to the env — same rule as Params/Headers. " +
+        "key = env var name; value = JSONPath ($.a.b, $.items[0].id, $[\"a\"]['b']). Missing paths are skipped. " +
+        "Applied by run_request / run_folder / run_collection and the UI Send.",
     ),
 };
 
@@ -292,6 +304,7 @@ export function registerTools(server: McpServer) {
         authJson: args.authJson ?? "{}",
         pathVarsJson: args.pathVarsJson ?? "[]",
         queryJson: args.queryJson ?? "[]",
+        extractorsJson: args.extractorsJson ?? "[]",
       };
       return toolText(await bridge("POST", "/v1/requests", row));
     },
@@ -381,7 +394,7 @@ export function registerTools(server: McpServer) {
 
   server.tool(
     "update_environment",
-    "Update environment name/vars/active flags",
+    "Replace the whole environment (name/varsJson/active). Prefer set_environment_vars when you only need to change one or a few variables.",
     {
       environmentId: z.string().min(1),
       workspaceId: z.string().min(1),
@@ -403,6 +416,21 @@ export function registerTools(server: McpServer) {
         await bridge("PUT", `/v1/environments/${args.environmentId}`, env),
       );
     },
+  );
+
+  server.tool(
+    "set_environment_vars",
+    "Merge variables into an environment (add/replace keys only — other keys stay). Use this instead of update_environment when chaining request ids into {{bookingId}} etc.",
+    {
+      environmentId: z.string().min(1).describe("Id from list_environments (non-global)"),
+      vars: z
+        .record(z.string())
+        .describe('Variables to merge, e.g. { "bookingId": "1418", "token": "…" }'),
+    },
+    async ({ environmentId, vars }) =>
+      toolText(
+        await bridge("POST", `/v1/environments/${environmentId}/vars`, { vars }),
+      ),
   );
 
   server.tool(
@@ -430,10 +458,13 @@ export function registerTools(server: McpServer) {
       "Vars: Global env always merges in; the chosen non-global env supplies {{var}} / path values.",
       "Pass environmentId to run against that env for this call only (does NOT change the UI active env).",
       "Omit environmentId to use whatever is currently active.",
+      "Optional vars: one-shot overrides for this call (not persisted); request extractorsJson still writes through to the saved env after a JSON response.",
+      "Result includes extracted: { var: value } for any extractors that fired.",
       "Compare Local vs Prod: call run_request twice with the same requestId and different environmentIds",
       "(from list_environments); compare status, resolvedUrl, and body in the two results.",
       "Both runs appear in History.",
       "Raster image responses (Content-Type image/*, not SVG) return body base64-encoded; sizeBytes is the real byte count.",
+      "For multi-step flows, prefer extractorsJson on each request + run_folder / run_collection.",
     ].join(" "),
     {
       requestId: z.string().min(1).describe("Id from list_requests / get_request"),
@@ -443,12 +474,76 @@ export function registerTools(server: McpServer) {
         .describe(
           "Non-global environment id from list_environments. Omit = use active env. Pass Local id then Prod id on two calls to compare the same request.",
         ),
+      vars: z
+        .record(z.string())
+        .optional()
+        .describe(
+          "Optional one-shot {{var}} overrides for this run only (not persisted). Extractors still persist into the environment.",
+        ),
     },
-    async ({ requestId, environmentId }) =>
+    async ({ requestId, environmentId, vars }) =>
       toolText(
         await bridge("POST", "/v1/run", {
           requestId,
           environmentId: environmentId ?? null,
+          vars: vars ?? {},
+        }),
+      ),
+  );
+
+  server.tool(
+    "run_folder",
+    [
+      "Run every request under a folder (and nested folders) in sidebar sortOrder.",
+      "Between steps, each request's extractorsJson writes into the chosen environment so later steps can use {{vars}}.",
+      "Each step lands in History. stopOnError defaults true.",
+      "Returns { steps: [...], extracted: {...}, stoppedEarly }.",
+    ].join(" "),
+    {
+      folderId: z.string().min(1).describe("Folder id from list_folders"),
+      environmentId: z
+        .string()
+        .optional()
+        .describe("Non-global env id; omit = active. Does not flip UI active."),
+      vars: z
+        .record(z.string())
+        .optional()
+        .describe("Optional one-shot overrides for the whole run (seed vars before step 1)."),
+      stopOnError: z
+        .boolean()
+        .optional()
+        .describe("Stop when a step fails (network error). Default true."),
+    },
+    async ({ folderId, environmentId, vars, stopOnError }) =>
+      toolText(
+        await bridge("POST", "/v1/run-folder", {
+          folderId,
+          environmentId: environmentId ?? null,
+          vars: vars ?? {},
+          stopOnError: stopOnError ?? true,
+        }),
+      ),
+  );
+
+  server.tool(
+    "run_collection",
+    [
+      "Run every request in a collection in sidebar tree order (folders DFS by sortOrder).",
+      "Same extractor chaining / History / stopOnError behavior as run_folder.",
+    ].join(" "),
+    {
+      collectionId: z.string().min(1),
+      environmentId: z.string().optional(),
+      vars: z.record(z.string()).optional(),
+      stopOnError: z.boolean().optional(),
+    },
+    async ({ collectionId, environmentId, vars, stopOnError }) =>
+      toolText(
+        await bridge("POST", "/v1/run-collection", {
+          collectionId,
+          environmentId: environmentId ?? null,
+          vars: vars ?? {},
+          stopOnError: stopOnError ?? true,
         }),
       ),
   );

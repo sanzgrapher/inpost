@@ -253,7 +253,56 @@ pub fn set_content_type(headers: &mut Vec<(String, String)>, ct: Option<&str>) {
 
 fn append_query(url: &str, key: &str, value: &str) -> String {
     let sep = if url.contains('?') { '&' } else { '?' };
-    format!("{url}{sep}{}={}", form_encode(key), form_encode(value))
+    format!(
+        "{url}{sep}{}={}",
+        query_encode_preserve_vars(key),
+        query_encode_preserve_vars(value)
+    )
+}
+
+/// Like `form_encode`, but leave `{{var}}` spans literal so later envsubst can resolve them
+/// (mirrors UI `encodeQueryPart`).
+fn query_encode_preserve_vars(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'{' && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
+            if let Some(rel) = s[i + 2..].find("}}") {
+                let end = i + 2 + rel + 2;
+                out.push_str(&s[i..end]);
+                i = end;
+                continue;
+            }
+        }
+        match bytes[i] {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'*' => {
+                out.push(bytes[i] as char);
+            }
+            b' ' => out.push('+'),
+            b => out.push_str(&format!("%{b:02X}")),
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Rebuild `url` query from enabled pairs (UI `queryJson` / MCP). Empty pairs leave `url` as-is.
+/// When pairs are present, any existing `?…` on `url` is dropped first (same as the UI `joinUrl`).
+pub fn apply_query_pairs(url: &str, pairs: &[(String, String)]) -> String {
+    let enabled: Vec<_> = pairs
+        .iter()
+        .filter(|(k, _)| !k.trim().is_empty())
+        .collect();
+    if enabled.is_empty() {
+        return url.to_string();
+    }
+    let base = url.split_once('?').map(|(b, _)| b).unwrap_or(url);
+    let mut out = base.to_string();
+    for (k, v) in enabled {
+        out = append_query(&out, k, v);
+    }
+    out
 }
 
 /// Substitute `:name` and `{name}` (not `{{name}}`) path placeholders.
@@ -418,6 +467,19 @@ mod tests {
         assert!(h[0].1.starts_with("Basic "));
         // "u:p" → dTpw
         assert_eq!(h[0].1, "Basic dTpw");
+    }
+
+    #[test]
+    fn query_pairs_replace_existing() {
+        let url = apply_query_pairs(
+            "https://x.test/v1?old=1",
+            &[("bookingId".into(), "{{id}}".into()), ("slot".into(), "A".into())],
+        );
+        assert_eq!(url, "https://x.test/v1?bookingId={{id}}&slot=A");
+        assert_eq!(
+            apply_query_pairs("https://x.test/v1", &[]),
+            "https://x.test/v1"
+        );
     }
 
     #[test]

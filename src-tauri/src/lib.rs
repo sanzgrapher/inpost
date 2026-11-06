@@ -205,6 +205,59 @@ fn resolve_env_maps(
     Ok((active, global))
 }
 
+/// Apply a request's extractorsJson against a response body; merge into the active
+/// (or named) non-global environment. Returns the vars that were written.
+#[tauri::command]
+fn apply_response_extractors(
+    state: tauri::State<'_, Arc<Db>>,
+    request_id: String,
+    body: String,
+    environment_id: Option<String>,
+) -> Result<HashMap<String, String>, String> {
+    let req = state.get_request(&request_id)?;
+    let workspace_id = state
+        .workspace_for_collection(&req.collection_id)?
+        .ok_or_else(|| "request collection has no workspace".to_string())?;
+    let envs = state.list_environments(Some(workspace_id))?;
+    let env = envs
+        .into_iter()
+        .find(|e| {
+            !e.is_global
+                && environment_id
+                    .as_deref()
+                    .map(|id| id == e.id)
+                    .unwrap_or(e.is_active)
+        })
+        .ok_or_else(|| "no active environment".to_string())?;
+    let mut vars: HashMap<String, String> =
+        serde_json::from_str(&env.vars_json).unwrap_or_default();
+    let written = inpost_core::extract::apply_extractors(&body, &req.extractors_json, &mut vars)?;
+    if written.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let extracted: HashMap<String, String> = written.into_iter().collect();
+    state.merge_environment_vars(&env.id, &extracted)?;
+    Ok(extracted)
+}
+
+#[tauri::command]
+fn run_folder(
+    state: tauri::State<'_, Arc<Db>>,
+    folder_id: String,
+    environment_id: Option<String>,
+) -> Result<bridge::RunSequenceResult, String> {
+    bridge::run_folder(&state, &folder_id, environment_id.as_deref())
+}
+
+#[tauri::command]
+fn run_collection(
+    state: tauri::State<'_, Arc<Db>>,
+    collection_id: String,
+    environment_id: Option<String>,
+) -> Result<bridge::RunSequenceResult, String> {
+    bridge::run_collection(&state, &collection_id, environment_id.as_deref())
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct McpStatus {
@@ -525,6 +578,9 @@ pub fn run() {
             delete_environment,
             send_http_request,
             resolve_env_maps,
+            apply_response_extractors,
+            run_folder,
+            run_collection,
             mcp_stdio_path,
             mcp_status,
             mcp_logs,

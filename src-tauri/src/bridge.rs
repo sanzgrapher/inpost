@@ -443,6 +443,25 @@ fn handle(
             }
             Err(e) => json_err(400, e),
         }
+        (&Method::Post, p) if p.starts_with("/v1/environments/") && p.ends_with("/vars") => {
+            // Merge keys into varsJson without replacing the whole map.
+            let id = p
+                .trim_start_matches("/v1/environments/")
+                .trim_end_matches("/vars");
+            #[derive(Deserialize)]
+            struct Body {
+                vars: HashMap<String, String>,
+            }
+            match read_body(&mut request).and_then(|b| {
+                serde_json::from_slice::<Body>(&b).map_err(|e| e.to_string())
+            }) {
+                Ok(body) => match db.merge_environment_vars(id, &body.vars) {
+                    Ok(v) => json_ok(v),
+                    Err(e) => json_err(400, e),
+                },
+                Err(e) => json_err(400, e),
+            }
+        }
         (&Method::Put, p) if p.starts_with("/v1/environments/") => {
             let id = p.trim_start_matches("/v1/environments/").to_string();
             match read_body(&mut request).and_then(|b| {
@@ -490,15 +509,81 @@ fn handle(
             struct Body {
                 request_id: String,
                 environment_id: Option<String>,
+                /// One-shot overrides merged into the chosen env for this call only (not persisted).
+                /// Extractors still write through to the saved environment afterward.
+                #[serde(default)]
+                vars: HashMap<String, String>,
             }
             match read_body(&mut request).and_then(|b| {
                 serde_json::from_slice::<Body>(&b).map_err(|e| e.to_string())
             }) {
-                Ok(body) => match run_request(db, &body.request_id, body.environment_id.as_deref())
-                {
+                Ok(body) => match run_request(
+                    db,
+                    &body.request_id,
+                    body.environment_id.as_deref(),
+                    &body.vars,
+                ) {
                     Ok(v) => json_ok(v),
                     Err(e) => json_err(400, e),
                 },
+                Err(e) => json_err(400, e),
+            }
+        }
+        (&Method::Post, "/v1/run-folder") => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Body {
+                folder_id: String,
+                environment_id: Option<String>,
+                #[serde(default)]
+                vars: HashMap<String, String>,
+                #[serde(default = "default_true")]
+                stop_on_error: bool,
+            }
+            match read_body(&mut request).and_then(|b| {
+                serde_json::from_slice::<Body>(&b).map_err(|e| e.to_string())
+            }) {
+                Ok(body) => {
+                    match run_sequence(
+                        db,
+                        RunScope::Folder(&body.folder_id),
+                        body.environment_id.as_deref(),
+                        &body.vars,
+                        body.stop_on_error,
+                    ) {
+                        Ok(v) => json_ok(v),
+                        Err(e) => json_err(400, e),
+                    }
+                }
+                Err(e) => json_err(400, e),
+            }
+        }
+        (&Method::Post, "/v1/run-collection") => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Body {
+                collection_id: String,
+                environment_id: Option<String>,
+                #[serde(default)]
+                vars: HashMap<String, String>,
+                #[serde(default = "default_true")]
+                stop_on_error: bool,
+            }
+            match read_body(&mut request).and_then(|b| {
+                serde_json::from_slice::<Body>(&b).map_err(|e| e.to_string())
+            }) {
+                Ok(body) => {
+                    match run_sequence(
+                        db,
+                        RunScope::Collection(&body.collection_id),
+                        body.environment_id.as_deref(),
+                        &body.vars,
+                        body.stop_on_error,
+                    ) {
+                        Ok(v) => json_ok(v),
+                        Err(e) => json_err(400, e),
+                    }
+                }
                 Err(e) => json_err(400, e),
             }
         }
@@ -548,24 +633,88 @@ fn handle(
     };
     state.push_log(method_s, path.clone(), status, detail);
     let _ = request.respond(response);
-    if status < 400 && method != Method::Get && path != "/v1/run" {
+    if status < 400
+        && method != Method::Get
+        && path != "/v1/run"
+        && path != "/v1/run-folder"
+        && path != "/v1/run-collection"
+    {
         let _ = app.emit("bridge-changed", json!({ "method": format!("{method:?}"), "path": path }));
     }
     Ok(())
 }
 
-fn run_request(
+fn default_true() -> bool {
+    true
+}
+
+enum RunScope<'a> {
+    Folder(&'a str),
+    Collection(&'a str),
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunStepResult {
+    pub request_id: String,
+    pub name: String,
+    pub ok: bool,
+    pub status: Option<u16>,
+    pub status_text: Option<String>,
+    pub elapsed_ms: Option<u64>,
+    pub resolved_url: Option<String>,
+    pub body: Option<String>,
+    pub error: Option<String>,
+    pub extracted: HashMap<String, String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunSequenceResult {
+    pub steps: Vec<RunStepResult>,
+    pub extracted: HashMap<String, String>,
+    pub stopped_early: bool,
+}
+
+/// UI / Tauri entry — same path as MCP `run_folder`.
+pub fn run_folder(
     db: &Db,
-    request_id: &str,
+    folder_id: &str,
     environment_id: Option<&str>,
-) -> Result<http_exec::SendRequestResult, String> {
-    let req = db.get_request(request_id)?;
-    let workspace_id = db
-        .workspace_for_collection(&req.collection_id)?
-        .ok_or_else(|| "request collection has no workspace".to_string())?;
-    let envs = db.list_environments(Some(workspace_id.clone()))?;
+) -> Result<RunSequenceResult, String> {
+    run_sequence(
+        db,
+        RunScope::Folder(folder_id),
+        environment_id,
+        &HashMap::new(),
+        true,
+    )
+}
+
+/// UI / Tauri entry — same path as MCP `run_collection`.
+pub fn run_collection(
+    db: &Db,
+    collection_id: &str,
+    environment_id: Option<&str>,
+) -> Result<RunSequenceResult, String> {
+    run_sequence(
+        db,
+        RunScope::Collection(collection_id),
+        environment_id,
+        &HashMap::new(),
+        true,
+    )
+}
+
+fn resolve_env_maps(
+    db: &Db,
+    workspace_id: &str,
+    environment_id: Option<&str>,
+) -> Result<(String, HashMap<String, String>, HashMap<String, String>), String> {
+    let envs = db.list_environments(Some(workspace_id.to_string()))?;
     let mut active = HashMap::new();
     let mut global = HashMap::new();
+    let mut env_id = String::new();
     for e in &envs {
         let map: HashMap<String, String> =
             serde_json::from_str(&e.vars_json).unwrap_or_default();
@@ -573,14 +722,150 @@ fn run_request(
             global = map;
         } else if environment_id.map(|id| id == e.id).unwrap_or(e.is_active) {
             active = map;
+            env_id = e.id.clone();
         }
     }
+    if env_id.is_empty() {
+        return Err(match environment_id {
+            Some(id) => format!("environment not found: {id}"),
+            None => "no active environment".into(),
+        });
+    }
+    Ok((env_id, active, global))
+}
+
+fn run_request(
+    db: &Db,
+    request_id: &str,
+    environment_id: Option<&str>,
+    vars_override: &HashMap<String, String>,
+) -> Result<serde_json::Value, String> {
+    let req = db.get_request(request_id)?;
+    let workspace_id = db
+        .workspace_for_collection(&req.collection_id)?
+        .ok_or_else(|| "request collection has no workspace".to_string())?;
+    let (env_id, mut active, global) =
+        resolve_env_maps(db, &workspace_id, environment_id)?;
+    for (k, v) in vars_override {
+        if !k.trim().is_empty() {
+            active.insert(k.clone(), v.clone());
+        }
+    }
+    let (result, extracted) = execute_and_record(db, &req, &workspace_id, &env_id, &mut active, &global)?;
+    match result {
+        Ok(r) => Ok(json!({
+            "status": r.status,
+            "statusText": r.status_text,
+            "headers": r.headers,
+            "body": r.body,
+            "bodyPretty": r.body_pretty,
+            "sizeBytes": r.size_bytes,
+            "elapsedMs": r.elapsed_ms,
+            "resolvedUrl": r.resolved_url,
+            "sentHeaders": r.sent_headers,
+            "extracted": extracted,
+        })),
+        Err(e) => Err(e),
+    }
+}
+
+fn run_sequence(
+    db: &Db,
+    scope: RunScope<'_>,
+    environment_id: Option<&str>,
+    vars_override: &HashMap<String, String>,
+    stop_on_error: bool,
+) -> Result<RunSequenceResult, String> {
+    let (collection_id, folder_id) = match scope {
+        RunScope::Folder(fid) => {
+            let folder = db.get_folder(fid)?;
+            (folder.collection_id, Some(fid.to_string()))
+        }
+        RunScope::Collection(cid) => (cid.to_string(), None),
+    };
+    let reqs = db.list_run_order(&collection_id, folder_id.as_deref())?;
+    if reqs.is_empty() {
+        return Ok(RunSequenceResult {
+            steps: Vec::new(),
+            extracted: HashMap::new(),
+            stopped_early: false,
+        });
+    }
+    let workspace_id = db
+        .workspace_for_collection(&collection_id)?
+        .ok_or_else(|| "collection has no workspace".to_string())?;
+    let (env_id, mut active, global) =
+        resolve_env_maps(db, &workspace_id, environment_id)?;
+    for (k, v) in vars_override {
+        if !k.trim().is_empty() {
+            active.insert(k.clone(), v.clone());
+        }
+    }
+    let mut steps = Vec::new();
+    let mut all_extracted = HashMap::new();
+    let mut stopped_early = false;
+    for req in reqs {
+        let (result, extracted) =
+            execute_and_record(db, &req, &workspace_id, &env_id, &mut active, &global)?;
+        for (k, v) in &extracted {
+            all_extracted.insert(k.clone(), v.clone());
+        }
+        let step = match result {
+            Ok(r) => RunStepResult {
+                request_id: req.id.clone(),
+                name: req.name.clone(),
+                ok: true,
+                status: Some(r.status),
+                status_text: Some(r.status_text),
+                elapsed_ms: Some(r.elapsed_ms),
+                resolved_url: Some(r.resolved_url),
+                body: Some(r.body),
+                error: None,
+                extracted,
+            },
+            Err(e) => RunStepResult {
+                request_id: req.id.clone(),
+                name: req.name.clone(),
+                ok: false,
+                status: None,
+                status_text: None,
+                elapsed_ms: None,
+                resolved_url: None,
+                body: None,
+                error: Some(e),
+                extracted,
+            },
+        };
+        let failed = !step.ok;
+        steps.push(step);
+        if failed && stop_on_error {
+            stopped_early = true;
+            break;
+        }
+    }
+    Ok(RunSequenceResult {
+        steps,
+        extracted: all_extracted,
+        stopped_early,
+    })
+}
+
+fn execute_and_record(
+    db: &Db,
+    req: &HttpRequest,
+    workspace_id: &str,
+    environment_id: &str,
+    active: &mut HashMap<String, String>,
+    global: &HashMap<String, String>,
+) -> Result<(Result<http_exec::SendRequestResult, String>, HashMap<String, String>), String> {
     let headers = inpost_core::httputil::parse_kv_pairs(&req.headers_json);
     let body_pairs = inpost_core::httputil::parse_kv_pairs(&req.body_pairs_json);
     let path_vars = inpost_core::httputil::parse_kv_pairs(&req.path_vars_json);
+    let query_pairs = inpost_core::httputil::parse_kv_pairs(&req.query_json);
+    let url = inpost_core::httputil::apply_query_pairs(&req.url, &query_pairs);
     let result = http_exec::send(SendRequestInput {
         method: req.method.clone(),
-        url: req.url.clone(),
+        url,
         headers,
         body: if req.body.is_empty() {
             None
@@ -596,118 +881,125 @@ fn run_request(
         global_vars: global.clone(),
     });
 
-    // Same history the UI writes, so MCP runs show up in the History rail.
-    {
-        let created_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
-        let sub = |s: &str| envsubst::substitute(s, &active, &global);
-        let sub_pairs = |raw: &str| -> serde_json::Value {
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else {
-                return serde_json::json!([]);
-            };
-            let Some(arr) = v.as_array() else {
-                return v;
-            };
-            serde_json::Value::Array(
-                arr.iter()
-                    .map(|row| {
-                        if let Some(pair) = row.as_array() {
-                            if pair.len() >= 2 {
-                                let mut next = pair.clone();
-                                next[0] = serde_json::Value::String(sub(
-                                    pair[0].as_str().unwrap_or(""),
-                                ));
-                                next[1] = serde_json::Value::String(sub(
-                                    pair[1].as_str().unwrap_or(""),
-                                ));
-                                return serde_json::Value::Array(next);
-                            }
-                        }
-                        if let Some(obj) = row.as_object() {
-                            let mut out = obj.clone();
-                            if let Some(k) = obj.get("key").and_then(|x| x.as_str()) {
-                                out.insert("key".into(), serde_json::Value::String(sub(k)));
-                            }
-                            if let Some(val) = obj.get("value").and_then(|x| x.as_str()) {
-                                out.insert("value".into(), serde_json::Value::String(sub(val)));
-                            }
-                            return serde_json::Value::Object(out);
-                        }
-                        row.clone()
-                    })
-                    .collect(),
-            )
-        };
-        let request_json = |resolved: &str, sent: Option<&Vec<(String, String)>>| {
-            let headers = match sent {
-                Some(h) => serde_json::Value::Array(
-                    h.iter()
-                        .map(|(k, v)| serde_json::json!({ "key": k, "value": v, "enabled": true }))
-                        .collect(),
-                ),
-                None => sub_pairs(&req.headers_json),
-            };
-            Some(
-                serde_json::json!({
-                    "urlTemplate": req.url,
-                    "resolvedUrl": resolved,
-                    "headers": headers,
-                    "body": if req.body.is_empty() {
-                        serde_json::Value::Null
-                    } else {
-                        serde_json::Value::String(sub(&req.body))
-                    },
-                    "bodyType": req.body_type,
-                    "bodyPairs": sub_pairs(&req.body_pairs_json),
-                    "authType": req.auth_type,
-                    "authJson": sub(&req.auth_json),
-                    "pathVars": sub_pairs(&req.path_vars_json),
-                })
-                .to_string(),
-            )
-        };
-        let entry = match &result {
-            Ok(r) => HistoryEntry {
-                id: String::new(),
-                workspace_id,
-                request_id: Some(req.id.clone()),
-                method: req.method.clone(),
-                url: r.resolved_url.clone(),
-                status: Some(r.status as i64),
-                status_text: Some(r.status_text.clone()),
-                elapsed_ms: Some(r.elapsed_ms as i64),
-                size_bytes: Some(r.size_bytes as i64),
-                error: None,
-                body: Some(r.body.clone()),
-                body_pretty: r.body_pretty.clone(),
-                headers_json: Some(serde_json::to_string(&r.headers).unwrap_or_else(|_| "[]".into())),
-                request_json: request_json(&r.resolved_url, Some(&r.sent_headers)),
-                created_at,
-            },
-            Err(e) => HistoryEntry {
-                id: String::new(),
-                workspace_id,
-                request_id: Some(req.id.clone()),
-                method: req.method.clone(),
-                url: req.url.clone(),
-                status: None,
-                status_text: None,
-                elapsed_ms: Some(0),
-                size_bytes: Some(0),
-                error: Some(e.clone()),
-                body: None,
-                body_pretty: None,
-                headers_json: None,
-                request_json: request_json(&req.url, None),
-                created_at,
-            },
-        };
-        let _ = db.insert_history(entry);
+    let mut extracted = HashMap::new();
+    if let Ok(ref r) = result {
+        let written = inpost_core::extract::apply_extractors(
+            &r.body,
+            &req.extractors_json,
+            active,
+        )?;
+        if !written.is_empty() {
+            extracted = written.iter().cloned().collect();
+            let _ = db.merge_environment_vars(environment_id, &extracted);
+        }
     }
 
-    result
+    let created_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let sub = |s: &str| envsubst::substitute(s, active, global);
+    let sub_pairs = |raw: &str| -> serde_json::Value {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else {
+            return serde_json::json!([]);
+        };
+        let Some(arr) = v.as_array() else {
+            return v;
+        };
+        serde_json::Value::Array(
+            arr.iter()
+                .map(|row| {
+                    if let Some(pair) = row.as_array() {
+                        if pair.len() >= 2 {
+                            let mut next = pair.clone();
+                            next[0] =
+                                serde_json::Value::String(sub(pair[0].as_str().unwrap_or("")));
+                            next[1] =
+                                serde_json::Value::String(sub(pair[1].as_str().unwrap_or("")));
+                            return serde_json::Value::Array(next);
+                        }
+                    }
+                    if let Some(obj) = row.as_object() {
+                        let mut out = obj.clone();
+                        if let Some(k) = obj.get("key").and_then(|x| x.as_str()) {
+                            out.insert("key".into(), serde_json::Value::String(sub(k)));
+                        }
+                        if let Some(val) = obj.get("value").and_then(|x| x.as_str()) {
+                            out.insert("value".into(), serde_json::Value::String(sub(val)));
+                        }
+                        return serde_json::Value::Object(out);
+                    }
+                    row.clone()
+                })
+                .collect(),
+        )
+    };
+    let request_json = |resolved: &str, sent: Option<&Vec<(String, String)>>| {
+        let headers = match sent {
+            Some(h) => serde_json::Value::Array(
+                h.iter()
+                    .map(|(k, v)| serde_json::json!({ "key": k, "value": v, "enabled": true }))
+                    .collect(),
+            ),
+            None => sub_pairs(&req.headers_json),
+        };
+        Some(
+            serde_json::json!({
+                "urlTemplate": req.url,
+                "resolvedUrl": resolved,
+                "headers": headers,
+                "body": if req.body.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::Value::String(sub(&req.body))
+                },
+                "bodyType": req.body_type,
+                "bodyPairs": sub_pairs(&req.body_pairs_json),
+                "authType": req.auth_type,
+                "authJson": sub(&req.auth_json),
+                "pathVars": sub_pairs(&req.path_vars_json),
+            })
+            .to_string(),
+        )
+    };
+    let entry = match &result {
+        Ok(r) => HistoryEntry {
+            id: String::new(),
+            workspace_id: workspace_id.to_string(),
+            request_id: Some(req.id.clone()),
+            method: req.method.clone(),
+            url: r.resolved_url.clone(),
+            status: Some(r.status as i64),
+            status_text: Some(r.status_text.clone()),
+            elapsed_ms: Some(r.elapsed_ms as i64),
+            size_bytes: Some(r.size_bytes as i64),
+            error: None,
+            body: Some(r.body.clone()),
+            body_pretty: r.body_pretty.clone(),
+            headers_json: Some(serde_json::to_string(&r.headers).unwrap_or_else(|_| "[]".into())),
+            request_json: request_json(&r.resolved_url, Some(&r.sent_headers)),
+            created_at,
+        },
+        Err(e) => HistoryEntry {
+            id: String::new(),
+            workspace_id: workspace_id.to_string(),
+            request_id: Some(req.id.clone()),
+            method: req.method.clone(),
+            url: req.url.clone(),
+            status: None,
+            status_text: None,
+            elapsed_ms: Some(0),
+            size_bytes: Some(0),
+            error: Some(e.clone()),
+            body: None,
+            body_pretty: None,
+            headers_json: None,
+            request_json: request_json(&req.url, None),
+            created_at,
+        },
+    };
+    let _ = db.insert_history(entry);
+    Ok((result, extracted))
 }
 
 #[cfg(test)]

@@ -2,7 +2,7 @@
 
 **Purpose:** Living log so any new chat stays on track. Agents **read this first**, then **append** after each user request they work on.
 
-**Last updated:** 2026-10-16 (disabled query params survive save)
+**Last updated:** 2026-11-07 (UI Run folder + Chain demo)
 
 ---
 
@@ -21,7 +21,7 @@
 | **MCP ref** | Localhost bridge + `session.json` + bundled `stdio.mjs`; Requestly MCP *packaging* (open MIT SDK) |
 | **Run** | `npm run build:mcp && npm run tauri dev` (or `npm run tauri dev` which runs build:mcp first) |
 | **Check** | `npm run check` → `cargo test -p inpost-core` + `src/searchQuery.ts` / `src/shortcuts.ts` / `src/workspaceSession.ts` / `src/envVar.ts` / `src/envSync.ts` / `src/reqMeta.ts` / `src/tabClose.ts` self-checks |
-| **Dev MCP (WSL)** | `inpost-dev-v7` in `~/.cursor/mcp.json` → dev data dir `stdio.mjs`; bump `vN` after every `mcp/src` change (see AGENTS.md). Windows prod = `inpost` in Windows config |
+| **Dev MCP (WSL)** | `inpost-dev-v9` in `~/.cursor/mcp.json` → dev data dir `stdio.mjs`; bump `vN` after every `mcp/src` change (see AGENTS.md). Windows prod = `inpost` in Windows config |
 | **MCP config** | Keep app open; point Cursor at `~/.local/share/com.inpost.desktop/mcp/stdio.mjs` (Linux) / `%APPDATA%\com.inpost.desktop\mcp\stdio.mjs` (Windows) — or copy from **Settings → MCP** |
 
 ### Key docs
@@ -44,6 +44,7 @@
 - [x] [#3](https://github.com/sanzgrapher/inpost/issues/3) headers (shipped `a293a3a`, closed)
 - [ ] [#4](https://github.com/sanzgrapher/inpost/issues/4) AppImage WebKit SIGABRT — fix in CI (strip libwayland-client) + crash reload; needs a release + reporter confirmation
 - [ ] Auth inherit-from-folder; multipart file bytes on the wire (UI Text/File done) — [#1](https://github.com/sanzgrapher/inpost/issues/1)
+- [x] [#5](https://github.com/sanzgrapher/inpost/issues/5) request chaining: `set_environment_vars`, `extractorsJson` (JSONPath), `run_folder` / `run_collection`, per-run `vars` — declarative (not full script sandbox; Scripts still deferred)
 - [ ] Docs polish: image upload/paste, per-folder descriptions, "View complete documentation" collection page listing all requests (Postman-style)
 
 ---
@@ -71,6 +72,31 @@
 ---
 
 ## Trace log (newest first)
+
+### 2026-11-07 — UI Run folder/collection + live Chain demo
+**User asked:** Set/use chaining; do we need separate Scripts; make UI usable for manual users.
+**Did:** No Scripts tab — Extract covers Postman Tests `environment.set` for chaining. Added UI **Run folder** / **Run collection** (tree ⋯ menu) + toast summary via same `bridge::run_folder`/`run_collection` as MCP. Fixed MCP/runner `queryJson` apply (preserve `{{var}}` while encoding). Seeded **Chain demo** under PokéAPI ws (`booking flow` folder); live run: step1 → `bookingId=9001`/`slot=A`, step2 → `…/get?bookingId=9001&slot=A`.
+**Needs next:** Try in UI: PokéAPI → Chain demo → booking flow ⋯ → Run folder. Close #5 if that feels right. Scripts still deferred.
+
+### 2026-11-07 — Request chaining (#5) via REA + declarative extractors
+**User asked:** Use REA on Postman / Insomnia / Requestly for response→env + runners; implement the same way in Inpost.
+**Did:** REA on Requestly ASAR (`SandboxService` / schemas): `collectionScriptsSchema.{preRequest,postResponse}`, `rq.environment.get/set` (+ Postman shims), `runnerSettingsSchema.{onErrorMode,keepVariableValues}`. Insomnia (OSS, not installed): QuickJS `insomnia.environment.set` + Collection Runner. Postman: `postman-runtime` VariableScope + Collection Runner (`pm.environment.set`). Common model = post-response script writes env + ordered runner — full JS sandbox deferred. Shipped the shared *capability* as Bruno-style rules: `extractorsJson` on requests (`var ← $.json.path`), core `extract.rs`, DB merge + DFS `list_run_order`, bridge `POST …/vars` + `/v1/run-folder` + `/v1/run-collection`, MCP `set_environment_vars` / `run_folder` / `run_collection` + `run_request.vars`, UI **Extract** tab + apply-on-Send. Tests: extract + merge + run-order.
+**Needs next:** Reload Cursor MCP (`inpost-dev-v8` already in mcp.json); close #5 after booking-flow check. Full Scripts/Tests sandbox still backlog. Smoke: `tauri dev` + `run-folder` over httpbin extracted `bookingId=1418` into step 2 URL.
+
+### 2026-11-06 — REA (rea-agents) MCP installed for Cursor
+**User asked:** Install REA via `npx rea-agents@latest setup`, show plan for approval, verify.
+**Did:** Upgraded WSL Node via nvm 22.22.3 → 22.23.4 (default; REA requires ≥22.23.4). `rea setup --client cursor` added `rea` → `npx -y rea-agents@6.8.0 mcp` to `~/.cursor/mcp.json` (backup `mcp.json.rea.backup`; `inpost-dev-v7`/`outpost` kept) and skill at `~/.agents/skills/reverse-engineer-anything`. Fixed a half-extracted npx cache entry. Verified: `rea doctor --client cursor --skill` all ok; MCP handshake → `rea` 6.8.0, 229 tools. No project files changed.
+**Needs next:** Restart Cursor to load `rea`. Native analysis engines (Ghidra/IDA/Hopper/Kuna/jadx) not configured — only needed for binary analysis.
+
+### 2026-11-06 — Triage #5 (extractors / env patch / folder run)
+**User asked:** Is [#5](https://github.com/sanzgrapher/inpost/issues/5) a standard API-client feature or one user's wish?
+**Did:** Research only. Response→var chaining + collection/folder runner are table stakes (Postman, Insomnia, Bruno, Hoppscotch, Thunder Client all have both). Env patch (merge) is an Inpost MCP ergonomics gap (`update_environment` = full `varsJson` replace). Per-run var overrides = nice-to-have (Postman runner data files, `bru run --env-var`).
+**Needs next:** If accepted: cheapest first = MCP `set_environment_vars` merge; then declarative extractors (`var <- $.json.path`) + `run_folder` in sortOrder; scripts stay deferred.
+
+### 2026-10-16 — History snapshot tabs remember Params/Overview
+**User asked:** Default Params is fine, but on history tabs leaving Overview (or another pane) and coming back reset / felt wrong when returning to Params.
+**Did:** `HistoryDetail` unmounts when the `__hist__:` tab is deselected, so `useState("params")` always restarted. Session `paneByEntry` Map restores last `reqTab`/`resTab` per entry id (first open still defaults to Params / Body).
+**Needs next:** User click-check on a history tab: Overview → switch to a request → back to history → still Overview.
 
 ### 2026-10-16 — Disabled query params survive save (like headers)
 **User asked:** Unchecking a Params checkbox then Save deletes the param; it should stay (unchecked) and only be omitted when building/sending the URL — same as headers.

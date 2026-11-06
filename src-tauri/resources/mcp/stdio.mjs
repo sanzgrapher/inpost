@@ -21201,6 +21201,9 @@ var requestFields = {
   pathVarsJson: external_exports.string().optional().describe('Values for :id / {id} URL placeholders: [{"key":"id","value":"42"}].'),
   queryJson: external_exports.string().optional().describe(
     'Query params: [{"key":"limit","value":"20","enabled":true},{"key":"debug","value":"1","enabled":false}] (same formats and enabled:false rule as headersJson). enabled:false rows stay in the Params table but are omitted from the URL / send. When omitted on create, params are taken from the URL query string.'
+  ),
+  extractorsJson: external_exports.string().optional().describe(
+    `Post-response extractors (same row shape as headersJson / queryJson). Canonical: [{"key":"bookingId","value":"$.data.id","enabled":true},{"key":"slot","value":"$.data.slot","enabled":false}]. enabled:false rows stay in the Extract table (unchecked) but are not written to the env \u2014 same rule as Params/Headers. key = env var name; value = JSONPath ($.a.b, $.items[0].id, $["a"]['b']). Missing paths are skipped. Applied by run_request / run_folder / run_collection and the UI Send.`
   )
 };
 var collectionDescriptionParam = external_exports.string().describe(
@@ -21361,7 +21364,8 @@ function registerTools(server2) {
         authType: args.authType ?? "none",
         authJson: args.authJson ?? "{}",
         pathVarsJson: args.pathVarsJson ?? "[]",
-        queryJson: args.queryJson ?? "[]"
+        queryJson: args.queryJson ?? "[]",
+        extractorsJson: args.extractorsJson ?? "[]"
       };
       return toolText(await bridge("POST", "/v1/requests", row));
     }
@@ -21439,7 +21443,7 @@ function registerTools(server2) {
   );
   server2.tool(
     "update_environment",
-    "Update environment name/vars/active flags",
+    "Replace the whole environment (name/varsJson/active). Prefer set_environment_vars when you only need to change one or a few variables.",
     {
       environmentId: external_exports.string().min(1),
       workspaceId: external_exports.string().min(1),
@@ -21463,6 +21467,17 @@ function registerTools(server2) {
     }
   );
   server2.tool(
+    "set_environment_vars",
+    "Merge variables into an environment (add/replace keys only \u2014 other keys stay). Use this instead of update_environment when chaining request ids into {{bookingId}} etc.",
+    {
+      environmentId: external_exports.string().min(1).describe("Id from list_environments (non-global)"),
+      vars: external_exports.record(external_exports.string()).describe('Variables to merge, e.g. { "bookingId": "1418", "token": "\u2026" }')
+    },
+    async ({ environmentId, vars }) => toolText(
+      await bridge("POST", `/v1/environments/${environmentId}/vars`, { vars })
+    )
+  );
+  server2.tool(
     "delete_environment",
     "Delete an environment. The workspace's Global environment cannot be deleted. If the deleted env was active, the first remaining non-global env (by name) becomes active.",
     { environmentId: external_exports.string().min(1).describe("Id from list_environments") },
@@ -21483,21 +21498,72 @@ function registerTools(server2) {
       "Vars: Global env always merges in; the chosen non-global env supplies {{var}} / path values.",
       "Pass environmentId to run against that env for this call only (does NOT change the UI active env).",
       "Omit environmentId to use whatever is currently active.",
+      "Optional vars: one-shot overrides for this call (not persisted); request extractorsJson still writes through to the saved env after a JSON response.",
+      "Result includes extracted: { var: value } for any extractors that fired.",
       "Compare Local vs Prod: call run_request twice with the same requestId and different environmentIds",
       "(from list_environments); compare status, resolvedUrl, and body in the two results.",
       "Both runs appear in History.",
-      "Raster image responses (Content-Type image/*, not SVG) return body base64-encoded; sizeBytes is the real byte count."
+      "Raster image responses (Content-Type image/*, not SVG) return body base64-encoded; sizeBytes is the real byte count.",
+      "For multi-step flows, prefer extractorsJson on each request + run_folder / run_collection."
     ].join(" "),
     {
       requestId: external_exports.string().min(1).describe("Id from list_requests / get_request"),
       environmentId: external_exports.string().optional().describe(
         "Non-global environment id from list_environments. Omit = use active env. Pass Local id then Prod id on two calls to compare the same request."
+      ),
+      vars: external_exports.record(external_exports.string()).optional().describe(
+        "Optional one-shot {{var}} overrides for this run only (not persisted). Extractors still persist into the environment."
       )
     },
-    async ({ requestId, environmentId }) => toolText(
+    async ({ requestId, environmentId, vars }) => toolText(
       await bridge("POST", "/v1/run", {
         requestId,
-        environmentId: environmentId ?? null
+        environmentId: environmentId ?? null,
+        vars: vars ?? {}
+      })
+    )
+  );
+  server2.tool(
+    "run_folder",
+    [
+      "Run every request under a folder (and nested folders) in sidebar sortOrder.",
+      "Between steps, each request's extractorsJson writes into the chosen environment so later steps can use {{vars}}.",
+      "Each step lands in History. stopOnError defaults true.",
+      "Returns { steps: [...], extracted: {...}, stoppedEarly }."
+    ].join(" "),
+    {
+      folderId: external_exports.string().min(1).describe("Folder id from list_folders"),
+      environmentId: external_exports.string().optional().describe("Non-global env id; omit = active. Does not flip UI active."),
+      vars: external_exports.record(external_exports.string()).optional().describe("Optional one-shot overrides for the whole run (seed vars before step 1)."),
+      stopOnError: external_exports.boolean().optional().describe("Stop when a step fails (network error). Default true.")
+    },
+    async ({ folderId, environmentId, vars, stopOnError }) => toolText(
+      await bridge("POST", "/v1/run-folder", {
+        folderId,
+        environmentId: environmentId ?? null,
+        vars: vars ?? {},
+        stopOnError: stopOnError ?? true
+      })
+    )
+  );
+  server2.tool(
+    "run_collection",
+    [
+      "Run every request in a collection in sidebar tree order (folders DFS by sortOrder).",
+      "Same extractor chaining / History / stopOnError behavior as run_folder."
+    ].join(" "),
+    {
+      collectionId: external_exports.string().min(1),
+      environmentId: external_exports.string().optional(),
+      vars: external_exports.record(external_exports.string()).optional(),
+      stopOnError: external_exports.boolean().optional()
+    },
+    async ({ collectionId, environmentId, vars, stopOnError }) => toolText(
+      await bridge("POST", "/v1/run-collection", {
+        collectionId,
+        environmentId: environmentId ?? null,
+        vars: vars ?? {},
+        stopOnError: stopOnError ?? true
       })
     )
   );

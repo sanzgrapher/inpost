@@ -67,6 +67,10 @@ pub struct HttpRequest {
     /// Query params with enabled flags; `url` keeps enabled-only for the wire.
     #[serde(default = "default_empty_array")]
     pub query_json: String,
+    /// Post-response extractors: `[{"key":"bookingId","value":"$.data.id","enabled":true}]`.
+    /// After a successful JSON response, enabled rows write `key` into the active env from JSONPath `value`.
+    #[serde(default = "default_empty_array")]
+    pub extractors_json: String,
     #[serde(default)]
     pub sort_order: i64,
 }
@@ -454,8 +458,53 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         )
         .map_err(|e| e.to_string())?;
     }
+    if !has_column(conn, "requests", "extractors_json")? {
+        conn.execute_batch(
+            "ALTER TABLE requests ADD COLUMN extractors_json TEXT NOT NULL DEFAULT '[]';",
+        )
+        .map_err(|e| e.to_string())?;
+    }
 
     Ok(())
+}
+
+fn collect_run_order(
+    folders: &[Folder],
+    requests: &[HttpRequest],
+    parent_id: Option<&str>,
+    out: &mut Vec<HttpRequest>,
+) {
+    #[derive(Clone)]
+    enum Sib {
+        Folder(String, i64, String),
+        Request(usize, i64, String),
+    }
+    let mut sibs: Vec<Sib> = Vec::new();
+    for f in folders {
+        if f.parent_id.as_deref() == parent_id {
+            sibs.push(Sib::Folder(f.id.clone(), f.sort_order, f.name.clone()));
+        }
+    }
+    for (i, r) in requests.iter().enumerate() {
+        if r.folder_id.as_deref() == parent_id {
+            sibs.push(Sib::Request(i, r.sort_order, r.name.clone()));
+        }
+    }
+    sibs.sort_by(|a, b| {
+        let (sa, na) = match a {
+            Sib::Folder(_, s, n) | Sib::Request(_, s, n) => (*s, n.as_str()),
+        };
+        let (sb, nb) = match b {
+            Sib::Folder(_, s, n) | Sib::Request(_, s, n) => (*s, n.as_str()),
+        };
+        sa.cmp(&sb).then_with(|| na.cmp(nb))
+    });
+    for s in sibs {
+        match s {
+            Sib::Folder(id, _, _) => collect_run_order(folders, requests, Some(&id), out),
+            Sib::Request(i, _, _) => out.push(requests[i].clone()),
+        }
+    }
 }
 
 fn parent_map(conn: &Connection, collection_id: &str) -> Result<HashMap<String, Option<String>>, String> {
@@ -827,6 +876,24 @@ impl Db {
         Ok(())
     }
 
+    pub fn get_folder(&self, id: &str) -> Result<Folder, String> {
+        let conn = self.0.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT id, collection_id, parent_id, name, sort_order FROM folders WHERE id = ?1",
+            params![id],
+            |r| {
+                Ok(Folder {
+                    id: r.get(0)?,
+                    collection_id: r.get(1)?,
+                    parent_id: r.get(2)?,
+                    name: r.get(3)?,
+                    sort_order: r.get(4)?,
+                })
+            },
+        )
+        .map_err(|_| "folder not found".to_string())
+    }
+
     pub fn list_folders(&self, collection_id: String) -> Result<Vec<Folder>, String> {
         let conn = self.0.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
@@ -956,7 +1023,8 @@ impl Db {
         let mut stmt = conn
             .prepare(
                 "SELECT id, collection_id, folder_id, name, method, url, headers_json, body, sort_order,
-                        body_type, body_pairs_json, auth_type, auth_json, path_vars_json, query_json, description
+                        body_type, body_pairs_json, auth_type, auth_json, path_vars_json, query_json, description,
+                        extractors_json
                  FROM requests WHERE collection_id = ?1
                  ORDER BY sort_order, name",
             )
@@ -986,6 +1054,9 @@ impl Db {
             path_vars_json: r.get(13)?,
             query_json: r.get::<_, Option<String>>(14)?.unwrap_or_else(|| "[]".into()),
             description: r.get::<_, Option<String>>(15)?.unwrap_or_default(),
+            extractors_json: r
+                .get::<_, Option<String>>(16)?
+                .unwrap_or_else(|| "[]".into()),
         })
     }
 
@@ -999,6 +1070,8 @@ impl Db {
             normalize_pairs(&req.path_vars_json).map_err(|e| format!("pathVarsJson: {e}"))?;
         req.query_json =
             normalize_pairs(&req.query_json).map_err(|e| format!("queryJson: {e}"))?;
+        req.extractors_json =
+            normalize_pairs(&req.extractors_json).map_err(|e| format!("extractorsJson: {e}"))?;
         let conn = self.0.lock().map_err(|e| e.to_string())?;
         let existing: Option<(Option<String>, i64)> = conn
             .query_row(
@@ -1041,8 +1114,9 @@ impl Db {
 
         conn.execute(
             "INSERT INTO requests (id, collection_id, folder_id, name, method, url, headers_json, body, sort_order,
-                                  body_type, body_pairs_json, auth_type, auth_json, path_vars_json, query_json, description)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                                  body_type, body_pairs_json, auth_type, auth_json, path_vars_json, query_json, description,
+                                  extractors_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
              ON CONFLICT(id) DO UPDATE SET
                collection_id=excluded.collection_id,
                name=excluded.name,
@@ -1056,7 +1130,8 @@ impl Db {
                auth_json=excluded.auth_json,
                path_vars_json=excluded.path_vars_json,
                query_json=excluded.query_json,
-               description=excluded.description",
+               description=excluded.description,
+               extractors_json=excluded.extractors_json",
             params![
                 req.id,
                 req.collection_id,
@@ -1074,6 +1149,7 @@ impl Db {
                 req.path_vars_json,
                 req.query_json,
                 req.description,
+                req.extractors_json,
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -1094,12 +1170,59 @@ impl Db {
         let conn = self.0.lock().map_err(|e| e.to_string())?;
         conn.query_row(
             "SELECT id, collection_id, folder_id, name, method, url, headers_json, body, sort_order,
-                    body_type, body_pairs_json, auth_type, auth_json, path_vars_json, query_json, description
+                    body_type, body_pairs_json, auth_type, auth_json, path_vars_json, query_json, description,
+                    extractors_json
              FROM requests WHERE id = ?1",
             params![id],
             Self::map_request,
         )
         .map_err(|e| e.to_string())
+    }
+
+    /// Merge `vars` into an environment's `vars_json` (add/replace keys; never removes others).
+    pub fn merge_environment_vars(
+        &self,
+        environment_id: &str,
+        vars: &HashMap<String, String>,
+    ) -> Result<Environment, String> {
+        let mut env = self.get_environment(environment_id)?;
+        let mut map: HashMap<String, String> =
+            serde_json::from_str(&env.vars_json).unwrap_or_default();
+        for (k, v) in vars {
+            if k.trim().is_empty() {
+                continue;
+            }
+            map.insert(k.clone(), v.clone());
+        }
+        env.vars_json = serde_json::to_string(&map).map_err(|e| e.to_string())?;
+        self.upsert_environment(env)
+    }
+
+    /// Requests under `folder_id` (None = collection root), depth-first, sibling `sort_order`.
+    /// Nested folders are visited in order between request siblings — same as the sidebar tree.
+    pub fn list_run_order(
+        &self,
+        collection_id: &str,
+        folder_id: Option<&str>,
+    ) -> Result<Vec<HttpRequest>, String> {
+        let folders = self.list_folders(collection_id.to_string())?;
+        let requests = self.list_requests(collection_id.to_string())?;
+        if let Some(fid) = folder_id {
+            if !folders.iter().any(|f| f.id == fid) {
+                return Err("folder not found".into());
+            }
+            if folders
+                .iter()
+                .find(|f| f.id == fid)
+                .map(|f| f.collection_id.as_str())
+                != Some(collection_id)
+            {
+                return Err("folder not in collection".into());
+            }
+        }
+        let mut out = Vec::new();
+        collect_run_order(&folders, &requests, folder_id, &mut out);
+        Ok(out)
     }
 
     pub fn delete_request(&self, id: &str) -> Result<(), String> {
@@ -1163,7 +1286,6 @@ impl Db {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub fn get_environment(&self, id: &str) -> Result<Environment, String> {
         let conn = self.0.lock().map_err(|e| e.to_string())?;
         conn.query_row(
@@ -1180,7 +1302,7 @@ impl Db {
                 })
             },
         )
-        .map_err(|e| e.to_string())
+        .map_err(|_| "environment not found".to_string())
     }
 
     pub fn list_environments(
@@ -1508,6 +1630,7 @@ mod tests {
             auth_json: "{}".into(),
             path_vars_json: "{}".into(),
             query_json: "[]".into(),
+            extractors_json: "[]".into(),
             sort_order: 0,
         })
         .unwrap();
@@ -1691,6 +1814,7 @@ mod tests {
             auth_json: "{}".into(),
             path_vars_json: "[]".into(),
             query_json: q.into(),
+            extractors_json: "[]".into(),
             sort_order: 0,
         })
         .unwrap();
@@ -1698,5 +1822,79 @@ mod tests {
         assert!(got.query_json.contains(r#""dbg""#));
         assert!(got.query_json.contains(r#""enabled":false"#));
         assert_eq!(got.url, "https://example.com?a=1");
+    }
+
+    #[test]
+    fn merge_environment_vars_keeps_other_keys() {
+        let db = mem_db();
+        let ws = db.list_workspaces().unwrap()[0].id.clone();
+        let envs = db.list_environments(Some(ws)).unwrap();
+        let mut local = envs.into_iter().find(|e| !e.is_global).unwrap();
+        local.vars_json = r#"{"a":"1","b":"2"}"#.into();
+        db.upsert_environment(local.clone()).unwrap();
+        let mut patch = HashMap::new();
+        patch.insert("b".into(), "9".into());
+        patch.insert("c".into(), "3".into());
+        let got = db.merge_environment_vars(&local.id, &patch).unwrap();
+        let map: HashMap<String, String> = serde_json::from_str(&got.vars_json).unwrap();
+        assert_eq!(map.get("a").map(String::as_str), Some("1"));
+        assert_eq!(map.get("b").map(String::as_str), Some("9"));
+        assert_eq!(map.get("c").map(String::as_str), Some("3"));
+    }
+
+    #[test]
+    fn list_run_order_dfs_by_sort() {
+        let db = mem_db();
+        let ws = db.list_workspaces().unwrap()[0].id.clone();
+        let col = db.create_collection("C".into(), ws).unwrap();
+        let f = db.create_folder(col.id.clone(), None, "F".into()).unwrap();
+        let mk = |name: &str, folder: Option<String>, extractors: &str| {
+            db.upsert_request(HttpRequest {
+                id: Uuid::new_v4().to_string(),
+                collection_id: col.id.clone(),
+                folder_id: folder,
+                name: name.into(),
+                description: String::new(),
+                method: "GET".into(),
+                url: format!("https://example.com/{name}"),
+                headers_json: "[]".into(),
+                body: String::new(),
+                body_type: "none".into(),
+                body_pairs_json: "[]".into(),
+                auth_type: "none".into(),
+                auth_json: "{}".into(),
+                path_vars_json: "[]".into(),
+                query_json: "[]".into(),
+                extractors_json: extractors.into(),
+                sort_order: 0,
+            })
+            .unwrap()
+        };
+        let root = mk("root", None, "[]");
+        let nested = mk("nested", Some(f.id.clone()), "[]");
+        // Reorder: folder first, then root request
+        db.reorder_siblings(
+            col.id.clone(),
+            None,
+            vec![
+                TreeOrderItem {
+                    kind: "folder".into(),
+                    id: f.id.clone(),
+                },
+                TreeOrderItem {
+                    kind: "request".into(),
+                    id: root.id.clone(),
+                },
+            ],
+        )
+        .unwrap();
+        let all = db.list_run_order(&col.id, None).unwrap();
+        assert_eq!(
+            all.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+            vec!["nested", "root"]
+        );
+        let only_folder = db.list_run_order(&col.id, Some(&f.id)).unwrap();
+        assert_eq!(only_folder.len(), 1);
+        assert_eq!(only_folder[0].id, nested.id);
     }
 }
