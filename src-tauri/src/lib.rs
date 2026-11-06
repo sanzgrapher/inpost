@@ -240,6 +240,15 @@ fn apply_response_extractors(
     Ok(extracted)
 }
 
+/// Response-pane filter: JSONPath over a JSON body → pretty JSON of the match.
+#[tauri::command]
+fn json_path_filter(body: String, path: String) -> Result<String, String> {
+    let root: serde_json::Value =
+        serde_json::from_str(body.trim()).map_err(|_| "response is not JSON".to_string())?;
+    let v = inpost_core::extract::json_path_get(&root, &path)?;
+    serde_json::to_string_pretty(&v).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn run_folder(
     state: tauri::State<'_, Arc<Db>>,
@@ -579,6 +588,7 @@ pub fn run() {
             send_http_request,
             resolve_env_maps,
             apply_response_extractors,
+            json_path_filter,
             run_folder,
             run_collection,
             mcp_stdio_path,

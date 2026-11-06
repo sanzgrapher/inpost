@@ -9,24 +9,20 @@ use serde_json::Value;
 
 use crate::httputil::{kv_rows, KvRow};
 
-/// Resolve a small JSONPath subset against `root`.
-///
-/// Supported: `$`, `$.a.b`, `$.items[0].id`, `$["a"]['b']`.
-/// Not supported: filters, recursive descent (`..`), wildcards, scripts.
-pub fn json_path_get(root: &Value, path: &str) -> Result<Value, String> {
-    let path = path.trim();
-    if path.is_empty() {
-        return Err("empty JSONPath".into());
-    }
-    if path == "$" {
-        return Ok(root.clone());
-    }
+enum Seg {
+    Key(String),
+    Index(usize),
+    /// `[*]` / `.*` — every array item or object value.
+    Wild,
+}
+
+fn parse_path(path: &str) -> Result<Vec<Seg>, String> {
     if !path.starts_with('$') {
         return Err(format!("JSONPath must start with '$' (got {path:?})"));
     }
-    let mut cur = root;
-    let mut i = 1; // after '$'
     let bytes = path.as_bytes();
+    let mut segs = Vec::new();
+    let mut i = 1; // after '$'
     while i < bytes.len() {
         match bytes[i] {
             b'.' => {
@@ -45,9 +41,7 @@ pub fn json_path_get(root: &Value, path: &str) -> Result<Value, String> {
                 if key.is_empty() {
                     return Err("empty property name in JSONPath".into());
                 }
-                cur = cur
-                    .get(key)
-                    .ok_or_else(|| format!("path not found: missing {key:?}"))?;
+                segs.push(if key == "*" { Seg::Wild } else { Seg::Key(key.into()) });
             }
             b'[' => {
                 i += 1;
@@ -70,9 +64,7 @@ pub fn json_path_get(root: &Value, path: &str) -> Result<Value, String> {
                         return Err("expected ']' after bracket key".into());
                     }
                     i += 1;
-                    cur = cur
-                        .get(key)
-                        .ok_or_else(|| format!("path not found: missing {key:?}"))?;
+                    segs.push(Seg::Key(key.into()));
                 } else {
                     let start = i;
                     while i < bytes.len() && bytes[i] != b']' {
@@ -81,14 +73,16 @@ pub fn json_path_get(root: &Value, path: &str) -> Result<Value, String> {
                     if i >= bytes.len() {
                         return Err("unclosed '[' in JSONPath".into());
                     }
-                    let idx_str = path[start..i].trim();
-                    let idx: usize = idx_str
-                        .parse()
-                        .map_err(|_| format!("invalid array index {idx_str:?}"))?;
+                    let inner = path[start..i].trim();
                     i += 1; // ']'
-                    cur = cur
-                        .get(idx)
-                        .ok_or_else(|| format!("path not found: index {idx}"))?;
+                    if inner == "*" {
+                        segs.push(Seg::Wild);
+                    } else {
+                        let idx: usize = inner
+                            .parse()
+                            .map_err(|_| format!("invalid array index {inner:?}"))?;
+                        segs.push(Seg::Index(idx));
+                    }
                 }
             }
             other => {
@@ -99,7 +93,53 @@ pub fn json_path_get(root: &Value, path: &str) -> Result<Value, String> {
             }
         }
     }
-    Ok(cur.clone())
+    Ok(segs)
+}
+
+/// Resolve a small JSONPath subset against `root`.
+///
+/// Supported: `$`, `$.a.b`, `$.items[0].id`, `$["a"]['b']`, wildcards `[*]` / `.*`.
+/// Without a wildcard the result is the single value (missing → error); with one it is
+/// an array of every match (items missing the rest of the path are skipped).
+/// Not supported: filters `[?()]`, recursive descent (`..`), slices, scripts.
+pub fn json_path_get(root: &Value, path: &str) -> Result<Value, String> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Err("empty JSONPath".into());
+    }
+    let segs = parse_path(path)?;
+    let mut frontier = vec![root];
+    let mut wild = false;
+    for seg in &segs {
+        let mut next = Vec::new();
+        for v in frontier {
+            match seg {
+                Seg::Wild => match v {
+                    Value::Array(a) => next.extend(a.iter()),
+                    Value::Object(o) => next.extend(o.values()),
+                    _ if wild => {}
+                    _ => return Err("'*' needs an array or object".into()),
+                },
+                Seg::Key(k) => match v.get(k.as_str()) {
+                    Some(x) => next.push(x),
+                    None if wild => {}
+                    None => return Err(format!("path not found: missing {k:?}")),
+                },
+                Seg::Index(n) => match v.get(*n) {
+                    Some(x) => next.push(x),
+                    None if wild => {}
+                    None => return Err(format!("path not found: index {n}")),
+                },
+            }
+        }
+        wild |= matches!(seg, Seg::Wild);
+        frontier = next;
+    }
+    Ok(if wild {
+        Value::Array(frontier.into_iter().cloned().collect())
+    } else {
+        frontier[0].clone()
+    })
 }
 
 /// Stringify a JSON value the way env vars need it (scalars plain, objects/arrays JSON).
@@ -169,6 +209,33 @@ mod tests {
             json_path_get(&root, "$[\"data\"]['id']").unwrap(),
             json!(1418)
         );
+    }
+
+    #[test]
+    fn path_wildcards() {
+        let root = json!({
+            "results": [{"name": "bulbasaur"}, {"name": "ivysaur"}, {"url": "x"}],
+            "game_indices": [
+                {"game_index": 76, "version": {"name": "red"}},
+                {"game_index": 132, "version": {"name": "gold"}}
+            ],
+            "obj": {"a": 1, "b": 2}
+        });
+        assert_eq!(
+            json_path_get(&root, "$.results[*].name").unwrap(),
+            json!(["bulbasaur", "ivysaur"])
+        );
+        assert_eq!(
+            json_path_get(&root, "$.game_indices[*].version.name").unwrap(),
+            json!(["red", "gold"])
+        );
+        assert_eq!(
+            json_path_get(&root, "$.game_indices[*].game_index").unwrap(),
+            json!([76, 132])
+        );
+        assert_eq!(json_path_get(&root, "$.obj.*").unwrap(), json!([1, 2]));
+        assert!(json_path_get(&root, "$.results[0].nope").is_err());
+        assert!(json_path_get(&root, "$.obj.a[*]").is_err());
     }
 
     #[test]

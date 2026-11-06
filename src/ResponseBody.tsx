@@ -1,4 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { ListFilter } from "lucide-react";
 import { CodeEditor } from "./CodeEditor";
 import {
   defaultBodyView,
@@ -22,7 +24,24 @@ export function ResponseBody({ body, bodyPretty, headers, url }: Props) {
   const ct = responseContentType(headers);
   const kind = previewKind(ct);
   const [view, setView] = useState<BodyView>(() => defaultBodyView(bodyPretty, kind));
+  const [filter, setFilter] = useState("");
+  const [filtered, setFiltered] = useState<{ out?: string; err?: string }>({});
   const pretty = view === "pretty" && bodyPretty ? bodyPretty : null;
+
+  useEffect(() => {
+    const path = filter.trim();
+    if (!path || !bodyPretty) {
+      setFiltered({});
+      return;
+    }
+    const t = setTimeout(() => {
+      invoke<string>("json_path_filter", { body, path })
+        .then((out) => setFiltered({ out }))
+        .catch((err) => setFiltered({ err: String(err) }));
+    }, 150);
+    return () => clearTimeout(t);
+  }, [filter, body, bodyPretty]);
+
   return (
     <>
       <div className="body-toolbar">
@@ -50,14 +69,32 @@ export function ResponseBody({ body, bodyPretty, headers, url }: Props) {
             Preview
           </button>
         )}
+        {bodyPretty && view !== "preview" && (
+          <label className={`body-filter${filtered.err ? " bad" : ""}`} title="Filter with JSONPath, e.g. $.results[*].name">
+            <ListFilter size={13} aria-hidden />
+            <input
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              onKeyDown={(e) => e.key === "Escape" && setFilter("")}
+              placeholder="$.results[*].name"
+              aria-label="Filter response with JSONPath"
+              spellCheck={false}
+            />
+          </label>
+        )}
       </div>
+      {filtered.err && <p className="body-filter-err">{filtered.err}</p>}
       {view === "preview" && kind ? (
         <div className="response-preview">
           <Preview kind={kind} contentType={ct} body={body} url={url} />
         </div>
       ) : (
         <div className="editor-fill">
-          <CodeEditor value={pretty ?? body} language={pretty ? "json" : "text"} readOnly />
+          {filtered.out !== undefined ? (
+            <CodeEditor value={filtered.out} language="json" readOnly />
+          ) : (
+            <CodeEditor value={pretty ?? body} language={pretty ? "json" : "text"} readOnly />
+          )}
         </div>
       )}
     </>
